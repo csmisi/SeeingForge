@@ -1,0 +1,1249 @@
+#include "app/MainWindow.h"
+
+#include <QAction>
+#include <QApplication>
+#include <QButtonGroup>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QDir>
+#include <QDateTime>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QFrame>
+#include <QHBoxLayout>
+#include <QHeaderView>
+#include <QLabel>
+#include <QListWidget>
+#include <QMenuBar>
+#include <QMessageBox>
+#include <QPainter>
+#include <QPushButton>
+#include <QProgressBar>
+#include <QPromise>
+#include <QResizeEvent>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QSet>
+#include <QSlider>
+#include <QStackedWidget>
+#include <QStatusBar>
+#include <QTableWidget>
+#include <QTimer>
+#include <QToolButton>
+#include <QVBoxLayout>
+#include <QtConcurrent>
+
+#include <algorithm>
+#include <cmath>
+
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent)
+{
+    setWindowTitle(QStringLiteral("SeeingForge"));
+    resize(1380, 860);
+    setMinimumSize(900, 620);
+    m_frameDebounce = new QTimer(this);
+    m_frameDebounce->setSingleShot(true);
+    m_frameDebounce->setInterval(90);
+    connect(m_frameDebounce, &QTimer::timeout, this, &MainWindow::loadSelectedFrame);
+    m_detectionDebounce = new QTimer(this);
+    m_detectionDebounce->setSingleShot(true);
+    m_detectionDebounce->setInterval(120);
+    connect(m_detectionDebounce, &QTimer::timeout, this, &MainWindow::updateDetection);
+    m_hotPixelDebounce = new QTimer(this);
+    m_hotPixelDebounce->setSingleShot(true);
+    m_hotPixelDebounce->setInterval(450);
+    connect(m_hotPixelDebounce, &QTimer::timeout,
+            this, &MainWindow::startHotPixelAnalysis);
+    createActions();
+    createMenus();
+    createWorkspace();
+
+    m_previewWatcher = new QFutureWatcher<seeingforge::PreviewImages>(this);
+    connect(m_previewWatcher, &QFutureWatcher<seeingforge::PreviewImages>::finished,
+            this, &MainWindow::previewRenderFinished);
+    m_hotPixelWatcher = new QFutureWatcher<seeingforge::HotPixelResult>(this);
+    connect(m_hotPixelWatcher, &QFutureWatcher<seeingforge::HotPixelResult>::finished,
+            this, &MainWindow::hotPixelAnalysisFinished);
+    m_qualityWatcher = new QFutureWatcher<seeingforge::QualityResult>(this);
+    connect(m_qualityWatcher, &QFutureWatcher<seeingforge::QualityResult>::finished,
+            this, &MainWindow::qualityAnalysisFinished);
+    connect(m_qualityWatcher, &QFutureWatcher<seeingforge::QualityResult>::progressRangeChanged,
+            this, [this](int minimum, int maximum) {
+                m_qualityProgress->setRange(minimum, maximum);
+            });
+    connect(m_qualityWatcher, &QFutureWatcher<seeingforge::QualityResult>::progressValueChanged,
+            this, [this](int value) { m_qualityProgress->setValue(value); });
+    m_exportWatcher = new QFutureWatcher<seeingforge::ExportResult>(this);
+    connect(m_exportWatcher, &QFutureWatcher<seeingforge::ExportResult>::finished,
+            this, &MainWindow::exportFinished);
+    connect(m_exportWatcher, &QFutureWatcher<seeingforge::ExportResult>::progressRangeChanged,
+            this, [this](int minimum, int maximum) {
+                m_exportProgress->setRange(minimum, maximum);
+            });
+    connect(m_exportWatcher, &QFutureWatcher<seeingforge::ExportResult>::progressValueChanged,
+            this, [this](int value) { m_exportProgress->setValue(value); });
+    statusBar()->showMessage(tr("Ready — open a SER recording to begin."));
+}
+
+void MainWindow::createActions()
+{
+    auto *openAction = new QAction(tr("&Open SER File…"), this);
+    openAction->setShortcut(QKeySequence::Open);
+    connect(openAction, &QAction::triggered, this, &MainWindow::openSerFile);
+    openAction->setObjectName(QStringLiteral("openSerAction"));
+
+    auto *exitAction = new QAction(tr("E&xit"), this);
+    exitAction->setShortcut(QKeySequence::Quit);
+    connect(exitAction, &QAction::triggered, qApp, &QApplication::quit);
+    exitAction->setObjectName(QStringLiteral("exitAction"));
+
+    m_fitAction = new QAction(tr("&Fit to Window"), this);
+    m_fitAction->setCheckable(true);
+    m_fitAction->setChecked(true);
+    m_fitAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_0));
+    connect(m_fitAction, &QAction::triggered, this, &MainWindow::fitImage);
+
+    m_actualSizeAction = new QAction(tr("&Actual Size"), this);
+    m_actualSizeAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_1));
+    connect(m_actualSizeAction, &QAction::triggered, this, &MainWindow::showActualSize);
+
+    auto *aboutAction = new QAction(tr("&About SeeingForge"), this);
+    connect(aboutAction, &QAction::triggered, this, &MainWindow::showAbout);
+    aboutAction->setObjectName(QStringLiteral("aboutAction"));
+}
+
+void MainWindow::createMenus()
+{
+    auto *fileMenu = menuBar()->addMenu(tr("&File"));
+    fileMenu->addAction(findChild<QAction *>(QStringLiteral("openSerAction")));
+    fileMenu->addSeparator();
+    fileMenu->addAction(findChild<QAction *>(QStringLiteral("exitAction")));
+    auto *viewMenu = menuBar()->addMenu(tr("&View"));
+    viewMenu->addAction(m_fitAction);
+    viewMenu->addAction(m_actualSizeAction);
+    auto *processingMenu = menuBar()->addMenu(tr("&Processing"));
+    processingMenu->addAction(tr("Save Workflow Preset…"))->setEnabled(false);
+    processingMenu->addAction(tr("Reset Current Step"))->setEnabled(false);
+    auto *helpMenu = menuBar()->addMenu(tr("&Help"));
+    helpMenu->addAction(findChild<QAction *>(QStringLiteral("aboutAction")));
+}
+
+void MainWindow::createWorkspace()
+{
+    auto *workspace = new QWidget(this);
+    auto *layout = new QHBoxLayout(workspace);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    layout->addWidget(createWorkflowPanel());
+    layout->addWidget(createPreviewPanel(), 1);
+    layout->addWidget(createInspectorPanel());
+    setCentralWidget(workspace);
+}
+
+QWidget *MainWindow::createWorkflowPanel()
+{
+    auto *panel = new QFrame(this);
+    panel->setObjectName(QStringLiteral("workflowPanel"));
+    panel->setFixedWidth(220);
+    panel->setStyleSheet(QStringLiteral(
+        "#workflowPanel { border-right: 1px solid palette(mid); background: palette(window); }"
+        "QListWidget { border: 0; background: transparent; outline: 0; }"
+        "QListWidget::item { padding: 13px 10px; border-radius: 5px; }"
+        "QListWidget::item:selected { background: palette(highlight); color: palette(highlighted-text); }"));
+    auto *layout = new QVBoxLayout(panel);
+    auto *heading = new QLabel(tr("WORKFLOW"), panel);
+    heading->setStyleSheet(QStringLiteral("color: #aab2bd; font-size: 11px; letter-spacing: 1px;"));
+    layout->addWidget(heading);
+    m_workflowList = new QListWidget(panel);
+    m_workflowList->addItems({tr("✓  Source"), tr("2  Calibration"), tr("3  Colour"),
+                              tr("4  Stabilize & crop"), tr("5  Quality"), tr("6  Export")});
+    m_workflowList->setCurrentRow(0);
+    connect(m_workflowList, &QListWidget::currentRowChanged,
+            this, &MainWindow::selectWorkflowStep);
+    layout->addWidget(m_workflowList, 1);
+    auto *presetButton = new QPushButton(tr("Save preset"), panel);
+    presetButton->setEnabled(false);
+    layout->addWidget(presetButton);
+    return panel;
+}
+
+QWidget *MainWindow::createPreviewPanel()
+{
+    auto *panel = new QFrame(this);
+    panel->setObjectName(QStringLiteral("previewPanel"));
+    panel->setStyleSheet(QStringLiteral("#previewPanel { background: #101317; }"));
+    auto *layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+
+    auto *bar = new QFrame(panel);
+    bar->setStyleSheet(QStringLiteral("background: palette(window); border-bottom: 1px solid palette(mid);"));
+    auto *barLayout = new QHBoxLayout(bar);
+    auto *title = new QLabel(tr("Colour preview"), bar);
+    QFont titleFont = title->font();
+    titleFont.setBold(true);
+    title->setFont(titleFont);
+    barLayout->addWidget(title);
+    m_previewStateLabel = new QLabel(tr("No recording loaded"), bar);
+    m_previewStateLabel->setStyleSheet(QStringLiteral("color: #aab2bd;"));
+    barLayout->addWidget(m_previewStateLabel);
+    barLayout->addStretch();
+    m_previewMode = new QButtonGroup(this);
+    auto *processedButton = new QToolButton(bar);
+    processedButton->setText(tr("Colour"));
+    processedButton->setCheckable(true);
+    processedButton->setChecked(true);
+    auto *originalButton = new QToolButton(bar);
+    originalButton->setText(tr("Raw luminance"));
+    originalButton->setCheckable(true);
+    m_previewMode->addButton(processedButton, 0);
+    m_previewMode->addButton(originalButton, 1);
+    auto *mosaicButton = new QToolButton(bar);
+    mosaicButton->setText(tr("Raw CFA mosaic"));
+    mosaicButton->setCheckable(true);
+    m_previewMode->addButton(mosaicButton, 2);
+    connect(m_previewMode, &QButtonGroup::idClicked, this, &MainWindow::previewModeChanged);
+    barLayout->addWidget(processedButton);
+    barLayout->addWidget(originalButton);
+    barLayout->addWidget(mosaicButton);
+    layout->addWidget(bar);
+
+    m_previewScrollArea = new QScrollArea(panel);
+    m_previewScrollArea->setAlignment(Qt::AlignCenter);
+    m_previewScrollArea->setWidgetResizable(true);
+    m_previewScrollArea->setStyleSheet(QStringLiteral("QScrollArea { border: 0; background: #101317; }"));
+    m_previewCanvas = new QWidget(m_previewScrollArea);
+    m_previewCanvas->setStyleSheet(QStringLiteral("background: #101317;"));
+    auto *canvasLayout = new QVBoxLayout(m_previewCanvas);
+    canvasLayout->setContentsMargins(24, 24, 24, 24);
+    m_imageLabel = new QLabel(m_previewCanvas);
+    m_imageLabel->setAlignment(Qt::AlignCenter);
+    m_imageLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+    canvasLayout->addWidget(m_imageLabel, 1, Qt::AlignCenter);
+    m_emptyLabel = new QLabel(tr("Open a SER recording\n\nFile → Open SER File…"), m_previewCanvas);
+    m_emptyLabel->setAlignment(Qt::AlignCenter);
+    m_emptyLabel->setStyleSheet(QStringLiteral("color: #aab2bd; font-size: 18px;"));
+    canvasLayout->addWidget(m_emptyLabel, 1);
+    m_previewScrollArea->setWidget(m_previewCanvas);
+    layout->addWidget(m_previewScrollArea, 1);
+
+    auto *viewControls = new QFrame(panel);
+    viewControls->setStyleSheet(QStringLiteral(
+        "background: palette(window); border-top: 1px solid palette(mid);"));
+    auto *viewLayout = new QHBoxLayout(viewControls);
+    viewLayout->setContentsMargins(8, 5, 8, 5);
+    viewLayout->addStretch();
+    auto *fitButton = new QPushButton(tr("Fit"), viewControls);
+    fitButton->setToolTip(tr("Fit image to the available preview area (Ctrl+0)"));
+    connect(fitButton, &QPushButton::clicked, this, &MainWindow::fitImage);
+    viewLayout->addWidget(fitButton);
+    auto *actualButton = new QPushButton(tr("1:1"), viewControls);
+    actualButton->setToolTip(tr("Show one image pixel per screen pixel (Ctrl+1)"));
+    connect(actualButton, &QPushButton::clicked, this, &MainWindow::showActualSize);
+    viewLayout->addWidget(actualButton);
+    auto *zoomOutButton = new QPushButton(QStringLiteral("−"), viewControls);
+    zoomOutButton->setToolTip(tr("Zoom out"));
+    zoomOutButton->setFixedWidth(36);
+    connect(zoomOutButton, &QPushButton::clicked, this, &MainWindow::zoomOut);
+    viewLayout->addWidget(zoomOutButton);
+    m_zoomLabel = new QLabel(tr("Fit"), viewControls);
+    m_zoomLabel->setAlignment(Qt::AlignCenter);
+    m_zoomLabel->setMinimumWidth(58);
+    viewLayout->addWidget(m_zoomLabel);
+    auto *zoomInButton = new QPushButton(QStringLiteral("+"), viewControls);
+    zoomInButton->setToolTip(tr("Zoom in"));
+    zoomInButton->setFixedWidth(36);
+    connect(zoomInButton, &QPushButton::clicked, this, &MainWindow::zoomIn);
+    viewLayout->addWidget(zoomInButton);
+    viewLayout->addStretch();
+    layout->addWidget(viewControls);
+
+    auto *timeline = new QFrame(panel);
+    timeline->setStyleSheet(QStringLiteral("background: palette(window); border-top: 1px solid palette(mid);"));
+    auto *timelineLayout = new QHBoxLayout(timeline);
+    m_frameLabel = new QLabel(tr("Frame — / —"), timeline);
+    timelineLayout->addWidget(m_frameLabel);
+    m_frameSlider = new QSlider(Qt::Horizontal, timeline);
+    m_frameSlider->setEnabled(false);
+    connect(m_frameSlider, &QSlider::valueChanged, this, [this](int value) {
+        if (m_serFile.isOpen()) {
+            m_frameLabel->setText(tr("Frame %1 / %2")
+                                      .arg(value + 1)
+                                      .arg(m_serFile.header().frameCount));
+            m_frameDebounce->start();
+        }
+    });
+    timelineLayout->addWidget(m_frameSlider, 1);
+    layout->addWidget(timeline);
+    return panel;
+}
+
+QWidget *MainWindow::createInspectorPanel()
+{
+    auto *panel = new QFrame(this);
+    panel->setObjectName(QStringLiteral("inspectorPanel"));
+    panel->setFixedWidth(285);
+    panel->setStyleSheet(QStringLiteral("#inspectorPanel { border-left: 1px solid palette(mid); background: palette(window); }"));
+    auto *layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(0, 0, 0, 0);
+    m_inspectorStack = new QStackedWidget(panel);
+    m_inspectorStack->addWidget(createSourceInspector());
+    m_inspectorStack->addWidget(createCalibrationInspector());
+    m_inspectorStack->addWidget(createColourInspector());
+    m_inspectorStack->addWidget(createStabilizeInspector());
+    m_inspectorStack->addWidget(createQualityInspector());
+    m_inspectorStack->addWidget(createExportInspector());
+    m_inspectorStack->setCurrentIndex(0);
+    layout->addWidget(m_inspectorStack);
+    return panel;
+}
+
+QWidget *MainWindow::createSourceInspector()
+{
+    auto *page = new QWidget(this);
+    auto *layout = new QVBoxLayout(page);
+    layout->addWidget(new QLabel(tr("<h2>Source</h2><p>Recording information</p>"), page));
+    m_metadataTable = new QTableWidget(10, 2, page);
+    m_metadataTable->setHorizontalHeaderLabels({tr("Property"), tr("Value")});
+    m_metadataTable->verticalHeader()->hide();
+    m_metadataTable->horizontalHeader()->setStretchLastSection(true);
+    m_metadataTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    m_metadataTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_metadataTable->setSelectionMode(QAbstractItemView::NoSelection);
+    layout->addWidget(m_metadataTable, 1);
+    auto *continueButton = new QPushButton(tr("Continue to calibration"), page);
+    connect(continueButton, &QPushButton::clicked, this,
+            [this] { m_workflowList->setCurrentRow(1); });
+    layout->addWidget(continueButton);
+    updateMetadata();
+    return page;
+}
+
+QWidget *MainWindow::createColourInspector()
+{
+    auto *page = new QWidget(this);
+    auto *layout = new QVBoxLayout(page);
+    layout->setContentsMargins(18, 16, 18, 16);
+    layout->addWidget(new QLabel(tr("<h2>Colour</h2><p>Changes update the preview without altering the source.</p>"), page));
+    layout->addWidget(new QLabel(tr("Debayer method"), page));
+    m_debayerMethod = new QComboBox(page);
+    m_debayerMethod->addItem(tr("Bayer-aware colour preview"), true);
+    m_debayerMethod->addItem(tr("No debayer — neutral raw preview"), false);
+    connect(m_debayerMethod, &QComboBox::currentIndexChanged, this, &MainWindow::requestPreviewRender);
+    layout->addWidget(m_debayerMethod);
+    layout->addWidget(new QLabel(tr("Bayer pattern"), page));
+    m_bayerPattern = new QComboBox(page);
+    m_bayerPattern->addItem(tr("From SER header"), 0);
+    m_bayerPattern->addItem(tr("RGGB"), 8);
+    m_bayerPattern->addItem(tr("GRBG"), 9);
+    m_bayerPattern->addItem(tr("GBRG"), 10);
+    m_bayerPattern->addItem(tr("BGGR"), 11);
+    connect(m_bayerPattern, &QComboBox::currentIndexChanged,
+            this, &MainWindow::requestPreviewRender);
+    layout->addWidget(m_bayerPattern);
+    m_whiteBalance = new QCheckBox(tr("Automatic white balance"), page);
+    m_whiteBalance->setChecked(true);
+    connect(m_whiteBalance, &QCheckBox::toggled, this, &MainWindow::requestPreviewRender);
+    layout->addWidget(m_whiteBalance);
+
+    auto addBalance = [&](const QString &name, QSlider **member, int value) {
+        auto *label = new QLabel(QStringLiteral("%1: %2").arg(name).arg(value / 100.0, 0, 'f', 2), page);
+        auto *slider = new QSlider(Qt::Horizontal, page);
+        slider->setRange(50, 200);
+        slider->setValue(value);
+        connect(slider, &QSlider::valueChanged, this, [this, label, name](int current) {
+            label->setText(QStringLiteral("%1: %2").arg(name).arg(current / 100.0, 0, 'f', 2));
+            requestPreviewRender();
+        });
+        layout->addWidget(label);
+        layout->addWidget(slider);
+        *member = slider;
+    };
+    addBalance(tr("Red balance"), &m_redBalance, 100);
+    addBalance(tr("Blue balance"), &m_blueBalance, 100);
+
+    auto *saturationLabel = new QLabel(tr("Saturation: 100%"), page);
+    m_saturation = new QSlider(Qt::Horizontal, page);
+    m_saturation->setRange(0, 400);
+    m_saturation->setValue(100);
+    m_saturation->setToolTip(tr("0% is monochrome; higher values reveal weak colour differences."));
+    connect(m_saturation, &QSlider::valueChanged, this,
+            [this, saturationLabel](int value) {
+                saturationLabel->setText(tr("Saturation: %1%").arg(value));
+                requestPreviewRender();
+            });
+    layout->addWidget(saturationLabel);
+    layout->addWidget(m_saturation);
+
+    auto *hueLabel = new QLabel(tr("Hue shift: 0°"), page);
+    m_hue = new QSlider(Qt::Horizontal, page);
+    m_hue->setRange(-180, 180);
+    m_hue->setValue(0);
+    m_hue->setToolTip(tr("Rotate all colours while preserving brightness."));
+    connect(m_hue, &QSlider::valueChanged, this,
+            [this, hueLabel](int value) {
+                hueLabel->setText(tr("Hue shift: %1°").arg(value));
+                requestPreviewRender();
+            });
+    layout->addWidget(hueLabel);
+    layout->addWidget(m_hue);
+
+    m_autoStretch = new QCheckBox(tr("Auto-stretch preview"), page);
+    m_autoStretch->setChecked(true);
+    connect(m_autoStretch, &QCheckBox::toggled, this, &MainWindow::requestPreviewRender);
+    layout->addWidget(m_autoStretch);
+    auto *note = new QLabel(
+        tr("<b>Preview only:</b> These colour adjustments do not modify the SER file "
+           "or its raw pixel data."), page);
+    note->setWordWrap(true);
+    note->setStyleSheet(QStringLiteral(
+        "color: #f0c96a; background: rgba(240, 201, 106, 0.08); "
+        "border: 1px solid rgba(240, 201, 106, 0.35); border-radius: 4px; padding: 8px;"));
+    layout->addWidget(note);
+    layout->addStretch();
+    auto *continueButton = new QPushButton(tr("Continue to stabilization"), page);
+    connect(continueButton, &QPushButton::clicked, this, [this] { m_workflowList->setCurrentRow(3); });
+    layout->addWidget(continueButton);
+    return page;
+}
+
+QWidget *MainWindow::createCalibrationInspector()
+{
+    auto *page = new QWidget(this);
+    auto *layout = new QVBoxLayout(page);
+    layout->setContentsMargins(18, 16, 18, 16);
+    layout->addWidget(new QLabel(tr("<h2>Calibration</h2><p>Find persistent sensor defects across the recording.</p>"), page));
+
+    m_hotPixelSamples = new QComboBox(page);
+    m_hotPixelSamples->addItem(tr("8 sampled frames — fast"), 8);
+    m_hotPixelSamples->addItem(tr("16 sampled frames — recommended"), 16);
+    m_hotPixelSamples->addItem(tr("32 sampled frames — thorough"), 32);
+    m_hotPixelSamples->setCurrentIndex(1);
+    connect(m_hotPixelSamples, &QComboBox::currentIndexChanged,
+            this, &MainWindow::requestHotPixelAnalysis);
+    layout->addWidget(new QLabel(tr("Frames distributed across recording"), page));
+    layout->addWidget(m_hotPixelSamples);
+
+    auto addSlider = [&](const QString &name, QSlider **member, int minimum,
+                         int maximum, int value, const QString &suffix) {
+        auto *label = new QLabel(QStringLiteral("%1: %2%3").arg(name).arg(value).arg(suffix), page);
+        auto *slider = new QSlider(Qt::Horizontal, page);
+        slider->setRange(minimum, maximum);
+        slider->setValue(value);
+        connect(slider, &QSlider::valueChanged, this, [this, label, name, suffix](int current) {
+            label->setText(QStringLiteral("%1: %2%3").arg(name).arg(current).arg(suffix));
+            requestHotPixelAnalysis();
+        });
+        layout->addWidget(label);
+        layout->addWidget(slider);
+        *member = slider;
+    };
+    addSlider(tr("Minimum brightness"), &m_hotPixelBrightness, 32, 255, 200, QString());
+    addSlider(tr("Local contrast"), &m_hotPixelContrast, 5, 128, 30, QString());
+    addSlider(tr("Required persistence"), &m_hotPixelPersistence, 50, 100, 80, QStringLiteral("%"));
+
+    m_analyzeHotPixels = new QPushButton(tr("Analyze hot pixels"), page);
+    connect(m_analyzeHotPixels, &QPushButton::clicked,
+            this, &MainWindow::startHotPixelAnalysis);
+    layout->addWidget(m_analyzeHotPixels);
+    m_showHotPixels = new QCheckBox(tr("Show hot-pixel overlay"), page);
+    m_showHotPixels->setChecked(true);
+    connect(m_showHotPixels, &QCheckBox::toggled, this, [this] { updateImage(); });
+    layout->addWidget(m_showHotPixels);
+    m_hotPixelLabel = new QLabel(tr("Analysis has not been run."), page);
+    m_hotPixelLabel->setWordWrap(true);
+    m_hotPixelLabel->setStyleSheet(QStringLiteral("color: #aab2bd;"));
+    layout->addWidget(m_hotPixelLabel);
+    auto *note = new QLabel(tr("A candidate must remain bright and locally isolated at the same sensor coordinate across the sampled frames."), page);
+    note->setWordWrap(true);
+    note->setStyleSheet(QStringLiteral("color: #aab2bd;"));
+    layout->addWidget(note);
+    layout->addStretch();
+    auto *continueButton = new QPushButton(tr("Continue to colour"), page);
+    connect(continueButton, &QPushButton::clicked, this,
+            [this] { m_workflowList->setCurrentRow(2); });
+    layout->addWidget(continueButton);
+    return page;
+}
+
+QWidget *MainWindow::createPlaceholderInspector(const QString &title, const QString &description)
+{
+    auto *page = new QWidget(this);
+    auto *layout = new QVBoxLayout(page);
+    layout->setContentsMargins(18, 16, 18, 16);
+    layout->addWidget(new QLabel(QStringLiteral("<h2>%1</h2>").arg(title.toHtmlEscaped()), page));
+    auto *body = new QLabel(description, page);
+    body->setWordWrap(true);
+    body->setStyleSheet(QStringLiteral("color: #aab2bd;"));
+    layout->addWidget(body);
+    layout->addStretch();
+    return page;
+}
+
+QWidget *MainWindow::createStabilizeInspector()
+{
+    auto *page = new QWidget(this);
+    auto *layout = new QVBoxLayout(page);
+    layout->setContentsMargins(18, 16, 18, 16);
+    layout->addWidget(new QLabel(tr("<h2>Stabilize & crop</h2><p>Detect the target and define safe surrounding space.</p>"), page));
+
+    auto *thresholdLabel = new QLabel(tr("Detection threshold: 16"), page);
+    m_detectionThreshold = new QSlider(Qt::Horizontal, page);
+    m_detectionThreshold->setRange(1, 254);
+    m_detectionThreshold->setValue(16);
+    connect(m_detectionThreshold, &QSlider::valueChanged, this,
+            [this, thresholdLabel](int value) {
+                thresholdLabel->setText(tr("Detection threshold: %1").arg(value));
+                if (m_detectionDebounce) m_detectionDebounce->start();
+            });
+    layout->addWidget(thresholdLabel);
+    layout->addWidget(m_detectionThreshold);
+
+    layout->addWidget(new QLabel(tr("Space around detected object"), page));
+    m_cropMargin = new QComboBox(page);
+    m_cropMargin->addItem(tr("10% on each side"), 10);
+    m_cropMargin->addItem(tr("20% on each side — recommended"), 20);
+    m_cropMargin->addItem(tr("30% on each side"), 30);
+    m_cropMargin->addItem(tr("50% on each side"), 50);
+    m_cropMargin->setCurrentIndex(1);
+    connect(m_cropMargin, &QComboBox::currentIndexChanged, this,
+            [this] { if (m_detectionDebounce) m_detectionDebounce->start(); });
+    layout->addWidget(m_cropMargin);
+
+    m_showDetection = new QCheckBox(tr("Show detection and recommended crop"), page);
+    m_showDetection->setChecked(true);
+    connect(m_showDetection, &QCheckBox::toggled, this, [this] { updateImage(); });
+    layout->addWidget(m_showDetection);
+
+    m_detectionLabel = new QLabel(tr("Open a recording to detect its target."), page);
+    m_detectionLabel->setWordWrap(true);
+    m_detectionLabel->setStyleSheet(QStringLiteral("color: #aab2bd;"));
+    layout->addWidget(m_detectionLabel);
+    auto *legend = new QLabel(tr("<span style='color:#52d273'>Green</span>: detected object<br>"
+                                 "<span style='color:#f0c64f'>Yellow</span>: recommended crop"), page);
+    layout->addWidget(legend);
+    layout->addStretch();
+    auto *continueButton = new QPushButton(tr("Continue to quality"), page);
+    connect(continueButton, &QPushButton::clicked, this,
+            [this] { m_workflowList->setCurrentRow(4); });
+    layout->addWidget(continueButton);
+    return page;
+}
+
+QWidget *MainWindow::createQualityInspector()
+{
+    auto *page = new QWidget(this);
+    auto *layout = new QVBoxLayout(page);
+    layout->setContentsMargins(18, 16, 18, 16);
+    layout->addWidget(new QLabel(
+        tr("<h2>Quality</h2><p>Rank frames by fine detail, contrast, exposure stability, and clipping.</p>"), page));
+
+    m_analyzeQuality = new QPushButton(tr("Analyze all frames"), page);
+    connect(m_analyzeQuality, &QPushButton::clicked,
+            this, &MainWindow::startQualityAnalysis);
+    m_cancelQuality = new QPushButton(tr("Cancel"), page);
+    m_cancelQuality->setEnabled(false);
+    connect(m_cancelQuality, &QPushButton::clicked,
+            this, &MainWindow::cancelQualityAnalysis);
+    auto *qualityButtons = new QHBoxLayout;
+    qualityButtons->addWidget(m_analyzeQuality, 1);
+    qualityButtons->addWidget(m_cancelQuality);
+    layout->addLayout(qualityButtons);
+    m_qualityProgress = new QProgressBar(page);
+    m_qualityProgress->setTextVisible(true);
+    m_qualityProgress->setFormat(tr("%v / %m frames (%p%)"));
+    m_qualityProgress->hide();
+    layout->addWidget(m_qualityProgress);
+
+    layout->addWidget(new QLabel(tr("Frames to keep"), page));
+    m_qualityKeep = new QComboBox(page);
+    m_qualityKeep->addItem(tr("Best 10% — strict"), 10);
+    m_qualityKeep->addItem(tr("Best 25% — recommended starting point"), 25);
+    m_qualityKeep->addItem(tr("Best 50%"), 50);
+    m_qualityKeep->addItem(tr("Best 75%"), 75);
+    m_qualityKeep->addItem(tr("100% — keep all"), 100);
+    m_qualityKeep->setCurrentIndex(1);
+    connect(m_qualityKeep, &QComboBox::currentIndexChanged,
+            this, &MainWindow::updateQualityDisplay);
+    layout->addWidget(m_qualityKeep);
+
+    layout->addWidget(new QLabel(tr("Frame order"), page));
+    m_qualityOrder = new QComboBox(page);
+    m_qualityOrder->addItem(tr("Original capture order"), 0);
+    m_qualityOrder->addItem(tr("Quality score — best first"), 1);
+    connect(m_qualityOrder, &QComboBox::currentIndexChanged,
+            this, &MainWindow::updateQualityDisplay);
+    layout->addWidget(m_qualityOrder);
+
+    m_qualityLabel = new QLabel(tr("Quality has not been analyzed."), page);
+    m_qualityLabel->setWordWrap(true);
+    m_qualityLabel->setStyleSheet(QStringLiteral("color: #aab2bd;"));
+    layout->addWidget(m_qualityLabel);
+
+    m_qualityTable = new QTableWidget(0, 3, page);
+    m_qualityTable->setHorizontalHeaderLabels({tr("Frame"), tr("Score"), tr("Keep")});
+    m_qualityTable->verticalHeader()->hide();
+    m_qualityTable->horizontalHeader()->setStretchLastSection(true);
+    m_qualityTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_qualityTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_qualityTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    connect(m_qualityTable, &QTableWidget::cellDoubleClicked, this,
+            [this](int row, int) {
+                if (!m_serFile.isOpen()) return;
+                const auto *item = m_qualityTable->item(row, 0);
+                if (!item) return;
+                const int frameIndex = item->data(Qt::UserRole).toInt();
+                m_frameSlider->setValue(frameIndex);
+                loadFrame(static_cast<std::uint32_t>(frameIndex));
+            });
+    layout->addWidget(m_qualityTable, 1);
+
+    auto *note = new QLabel(
+        tr("Double-click a row to inspect that frame. Ranking does not alter raw data."), page);
+    note->setWordWrap(true);
+    note->setStyleSheet(QStringLiteral("color: #aab2bd;"));
+    layout->addWidget(note);
+    auto *continueButton = new QPushButton(tr("Continue to export"), page);
+    connect(continueButton, &QPushButton::clicked, this,
+            [this] { m_workflowList->setCurrentRow(5); });
+    layout->addWidget(continueButton);
+    return page;
+}
+
+QWidget *MainWindow::createExportInspector()
+{
+    auto *page = new QWidget(this);
+    auto *layout = new QVBoxLayout(page);
+    layout->setContentsMargins(18, 16, 18, 16);
+    layout->addWidget(new QLabel(
+        tr("<h2>Export</h2><p>Create a stabilized SER recording from the selected frames.</p>"), page));
+
+    layout->addWidget(new QLabel(tr("Format"), page));
+    auto *format = new QComboBox(page);
+    format->addItem(tr("SER recording — preserve source pixel depth"));
+    format->setEnabled(false);
+    layout->addWidget(format);
+
+    m_exportMonochrome = new QCheckBox(tr("Export in monochrome"), page);
+    m_exportMonochrome->setToolTip(
+        tr("Convert to monochrome at full resolution. The source file is never changed."));
+    layout->addWidget(m_exportMonochrome);
+    auto *monochromeWarning = new QLabel(
+        tr("The exported copy will permanently discard all colour information."), page);
+    monochromeWarning->setWordWrap(true);
+    monochromeWarning->setStyleSheet(QStringLiteral("color: #f0c96a; font-weight: 600;"));
+    layout->addWidget(monochromeWarning);
+    m_exportMonoBinning = new QCheckBox(tr("2×2 binning (half width and height)"), page);
+    m_exportMonoBinning->setEnabled(false);
+    connect(m_exportMonochrome, &QCheckBox::toggled,
+            m_exportMonoBinning, &QCheckBox::setEnabled);
+    layout->addWidget(m_exportMonoBinning);
+    auto *monochromeNote = new QLabel(
+        tr("Monochrome preserves full resolution by default. Optional 2×2 binning reduces "
+           "width and height by half. Cropping still applies."), page);
+    monochromeNote->setWordWrap(true);
+    monochromeNote->setStyleSheet(QStringLiteral("color: #aab2bd;"));
+    layout->addWidget(monochromeNote);
+
+    m_exportSummary = new QLabel(
+        tr("The output will be placed beside the source in a new seeingforge_yyyymmdd_hhmm folder."), page);
+    m_exportSummary->setWordWrap(true);
+    layout->addWidget(m_exportSummary);
+
+    auto *processing = new QLabel(
+        tr("<b>Applied:</b> quality selection and order, recommended crop size, "
+           "and per-frame object centering.<br><br>"
+           "Raw sample values and SER metadata are preserved. Colour adjustments and overlays remain preview-only."), page);
+    processing->setWordWrap(true);
+    processing->setStyleSheet(QStringLiteral(
+        "color: #aab2bd; background: rgba(255,255,255,0.035); "
+        "border: 1px solid palette(mid); border-radius: 4px; padding: 8px;"));
+    layout->addWidget(processing);
+
+    m_exportButton = new QPushButton(tr("Export SER"), page);
+    connect(m_exportButton, &QPushButton::clicked, this, &MainWindow::startExport);
+    m_cancelExport = new QPushButton(tr("Cancel"), page);
+    m_cancelExport->setEnabled(false);
+    connect(m_cancelExport, &QPushButton::clicked, this, &MainWindow::cancelExport);
+    auto *exportButtons = new QHBoxLayout;
+    exportButtons->addWidget(m_exportButton, 1);
+    exportButtons->addWidget(m_cancelExport);
+    layout->addLayout(exportButtons);
+    m_exportProgress = new QProgressBar(page);
+    m_exportProgress->setFormat(tr("%v / %m frames (%p%)"));
+    m_exportProgress->hide();
+    layout->addWidget(m_exportProgress);
+    m_exportResultLabel = new QLabel(tr("Nothing exported yet."), page);
+    m_exportResultLabel->setWordWrap(true);
+    m_exportResultLabel->setStyleSheet(QStringLiteral("color: #aab2bd;"));
+    layout->addWidget(m_exportResultLabel);
+    layout->addStretch();
+    return page;
+}
+
+void MainWindow::openSerFile()
+{
+    QFileDialog dialog(this, tr("Open SER Recording"));
+    dialog.setOption(QFileDialog::DontUseNativeDialog, true);
+    dialog.setFileMode(QFileDialog::ExistingFile);
+    dialog.setAcceptMode(QFileDialog::AcceptOpen);
+    dialog.setNameFilters({tr("SER recordings (*.ser *.SER)"), tr("All files (*)")});
+    dialog.setViewMode(QFileDialog::Detail);
+    dialog.setDirectory(m_serFile.isOpen()
+                            ? QFileInfo(m_serFile.path()).absolutePath()
+                            : QDir::homePath());
+    dialog.resize(1050, 650);
+    if (dialog.exec() == QDialog::Accepted && !dialog.selectedFiles().isEmpty())
+        loadSerFile(dialog.selectedFiles().constFirst());
+}
+
+void MainWindow::loadSerFile(const QString &path)
+{
+    if (!m_serFile.open(path)) {
+        QMessageBox::critical(this, tr("Cannot Open SER File"), m_serFile.errorString());
+        return;
+    }
+    m_currentFrame = 0;
+    m_frameSlider->setRange(0, static_cast<int>(m_serFile.header().frameCount - 1));
+    m_frameSlider->setValue(0);
+    m_frameSlider->setEnabled(true);
+    m_debayerMethod->setEnabled(seeingforge::PreviewProcessor::supportsDebayer(m_serFile.header().colorId));
+    m_bayerPattern->setItemText(0, tr("From SER header — %1").arg(m_serFile.header().colorName()));
+    m_hotPixels = {};
+    m_hotPixelLabel->setText(tr("Analysis has not been run."));
+    m_qualityResult = {};
+    m_qualityTable->setRowCount(0);
+    m_qualityLabel->setText(tr("Quality has not been analyzed."));
+    m_workflowList->setCurrentRow(0);
+    loadFrame(0);
+    updateMetadata();
+    const QFileInfo info(path);
+    setWindowTitle(QStringLiteral("%1 — SeeingForge").arg(info.fileName()));
+    statusBar()->showMessage(tr("Loaded %1").arg(info.fileName()));
+}
+
+void MainWindow::loadFrame(std::uint32_t index)
+{
+    m_rawFrame = m_serFile.readFrame(index);
+    if (m_rawFrame.isNull()) {
+        QMessageBox::critical(this, tr("Cannot Read Frame"), tr("Frame %1 could not be decoded.").arg(index + 1));
+        return;
+    }
+    m_currentFrame = index;
+    m_emptyLabel->hide();
+    m_frameLabel->setText(tr("Frame %1 / %2").arg(index + 1).arg(m_serFile.header().frameCount));
+    requestPreviewRender();
+    if (m_detectionDebounce) m_detectionDebounce->start();
+}
+
+seeingforge::PreviewSettings MainWindow::previewSettings() const
+{
+    seeingforge::PreviewSettings settings;
+    settings.debayer = m_debayerMethod->currentData().toBool();
+    settings.autoStretch = m_autoStretch->isChecked();
+    settings.whiteBalance = m_whiteBalance->isChecked();
+    settings.redBalance = m_redBalance->value() / 100.0;
+    settings.blueBalance = m_blueBalance->value() / 100.0;
+    settings.saturation = m_saturation->value() / 100.0;
+    settings.hueShiftDegrees = m_hue->value();
+    return settings;
+}
+
+std::uint32_t MainWindow::effectiveColorId() const
+{
+    if (m_bayerPattern && m_bayerPattern->currentData().toUInt() != 0)
+        return m_bayerPattern->currentData().toUInt();
+    return m_serFile.header().colorId;
+}
+
+void MainWindow::requestPreviewRender()
+{
+    if (m_rawFrame.isNull() || !m_previewWatcher) return;
+    if (m_previewWatcher->isRunning()) {
+        m_renderDirty = true;
+        return;
+    }
+    startPreviewRender();
+}
+
+void MainWindow::startPreviewRender()
+{
+    m_renderDirty = false;
+    m_previewStateLabel->setText(tr("Rendering preview…"));
+    const QImage frame = m_rawFrame;
+    const std::uint32_t colorId = effectiveColorId();
+    const auto settings = previewSettings();
+    m_previewWatcher->setFuture(QtConcurrent::run([frame, colorId, settings] {
+        return seeingforge::PreviewProcessor::render(frame, colorId, settings);
+    }));
+}
+
+void MainWindow::previewRenderFinished()
+{
+    m_previews = m_previewWatcher->result();
+    m_previewStateLabel->setText(tr("Preview ready"));
+    updateImage();
+    if (m_renderDirty) startPreviewRender();
+}
+
+void MainWindow::updateDetection()
+{
+    if (m_rawFrame.isNull() || !m_detectionThreshold || !m_cropMargin) return;
+    m_detection = seeingforge::ObjectDetector::detect(
+        m_rawFrame, m_detectionThreshold->value(), m_cropMargin->currentData().toInt());
+    if (m_detection.found()) {
+        m_detectionLabel->setText(
+            tr("Object: %1 × %2 px\nRecommended crop: %3 × %4 px")
+                .arg(m_detection.objectRect.width()).arg(m_detection.objectRect.height())
+                .arg(m_detection.cropRect.width()).arg(m_detection.cropRect.height()));
+    } else {
+        m_detectionLabel->setText(tr("No object detected. Lower the threshold until the target is outlined."));
+    }
+    updateImage();
+}
+
+void MainWindow::startHotPixelAnalysis()
+{
+    if (!m_serFile.isOpen()) return;
+    if (m_hotPixelWatcher->isRunning()) {
+        m_hotPixelDirty = true;
+        return;
+    }
+    m_hotPixelDirty = false;
+    seeingforge::HotPixelSettings settings;
+    settings.sampleCount = m_hotPixelSamples->currentData().toInt();
+    settings.minimumBrightness = m_hotPixelBrightness->value();
+    settings.localContrast = m_hotPixelContrast->value();
+    settings.persistencePercent = m_hotPixelPersistence->value();
+    const seeingforge::SerFile file = m_serFile;
+    m_analyzeHotPixels->setEnabled(false);
+    m_hotPixelLabel->setText(tr("Analyzing sampled frames…"));
+    m_hotPixelWatcher->setFuture(QtConcurrent::run([file, settings] {
+        return seeingforge::HotPixelDetector::detect(file, settings);
+    }));
+}
+
+void MainWindow::requestHotPixelAnalysis()
+{
+    if (!m_serFile.isOpen() || !m_hotPixelDebounce) return;
+    m_hotPixelDirty = true;
+    m_hotPixelLabel->setText(tr("Settings changed — updated analysis scheduled…"));
+    m_hotPixelDebounce->start();
+}
+
+void MainWindow::hotPixelAnalysisFinished()
+{
+    m_hotPixels = m_hotPixelWatcher->result();
+    m_analyzeHotPixels->setEnabled(true);
+    m_hotPixelLabel->setText(
+        tr("Detected %1 persistent hot pixels from %2 initial candidates across %3 frames.")
+            .arg(m_hotPixels.hotPixels.size())
+            .arg(m_hotPixels.initialCandidates)
+            .arg(m_hotPixels.sampledFrames));
+    updateImage();
+    if (m_hotPixelDirty) startHotPixelAnalysis();
+}
+
+void MainWindow::startQualityAnalysis()
+{
+    if (!m_serFile.isOpen() || m_qualityWatcher->isRunning()) return;
+    const seeingforge::SerFile file = m_serFile;
+    const int backgroundThreshold = m_detectionThreshold
+        ? m_detectionThreshold->value() : 12;
+    m_analyzeQuality->setEnabled(false);
+    m_cancelQuality->setEnabled(true);
+    m_qualityProgress->setRange(0, static_cast<int>(m_serFile.header().frameCount));
+    m_qualityProgress->setValue(0);
+    m_qualityProgress->show();
+    m_qualityKeep->setEnabled(false);
+    m_qualityOrder->setEnabled(false);
+    m_qualityLabel->setText(
+        tr("Analyzing %1 frames… Large recordings can take a while because every frame is read.")
+            .arg(m_serFile.header().frameCount));
+    statusBar()->showMessage(tr("Analyzing frame quality…"));
+    m_qualityCancel = std::make_shared<std::atomic_bool>(false);
+    const auto cancelFlag = m_qualityCancel;
+    m_qualityWatcher->setFuture(QtConcurrent::run(
+        [file, backgroundThreshold, cancelFlag](QPromise<seeingforge::QualityResult> &promise) {
+            promise.setProgressRange(0, static_cast<int>(file.header().frameCount));
+            auto result = seeingforge::QualityAnalyzer::analyze(
+                file, backgroundThreshold,
+                [&promise](int completed, int) { promise.setProgressValue(completed); },
+                [cancelFlag] { return cancelFlag->load(); });
+            promise.addResult(std::move(result));
+        }));
+}
+
+void MainWindow::qualityAnalysisFinished()
+{
+    const seeingforge::QualityResult result = m_qualityWatcher->result();
+    m_analyzeQuality->setEnabled(true);
+    m_cancelQuality->setEnabled(false);
+    m_qualityProgress->hide();
+    m_qualityKeep->setEnabled(true);
+    m_qualityOrder->setEnabled(true);
+    if (result.canceled) {
+        m_qualityLabel->setText(tr("Quality analysis canceled. Previous results were preserved."));
+        statusBar()->showMessage(tr("Quality analysis canceled."), 5000);
+        return;
+    }
+    m_qualityResult = result;
+    statusBar()->showMessage(tr("Quality analysis complete."), 5000);
+    updateQualityDisplay();
+}
+
+void MainWindow::cancelQualityAnalysis()
+{
+    if (!m_qualityWatcher->isRunning() || !m_qualityCancel) return;
+    m_qualityCancel->store(true);
+    m_cancelQuality->setEnabled(false);
+    m_qualityLabel->setText(tr("Canceling after the current frame…"));
+}
+
+void MainWindow::updateQualityDisplay()
+{
+    if (m_qualityResult.isEmpty() || !m_qualityTable) return;
+    const int total = static_cast<int>(m_qualityResult.frames.size());
+    const int keepPercent = m_qualityKeep->currentData().toInt();
+    const int keepCount = std::clamp(
+        static_cast<int>(std::ceil(total * keepPercent / 100.0)), 1, total);
+
+    QSet<std::uint32_t> accepted;
+    for (int rank = 0; rank < keepCount; ++rank)
+        accepted.insert(m_qualityResult.rankedFrameIndices[rank]);
+
+    QVector<double> scoreByIndex(
+        static_cast<qsizetype>(m_serFile.header().frameCount), 0.0);
+    for (const auto &frame : m_qualityResult.frames)
+        scoreByIndex[static_cast<qsizetype>(frame.frameIndex)] = frame.score;
+
+    QVector<std::uint32_t> displayOrder;
+    if (m_qualityOrder->currentData().toInt() == 1) {
+        displayOrder = m_qualityResult.rankedFrameIndices;
+    } else {
+        displayOrder.reserve(m_qualityResult.frames.size());
+        for (const auto &frame : m_qualityResult.frames)
+            displayOrder.append(frame.frameIndex);
+    }
+
+    m_qualityTable->setSortingEnabled(false);
+    m_qualityTable->setRowCount(displayOrder.size());
+    for (qsizetype row = 0; row < displayOrder.size(); ++row) {
+        const std::uint32_t frameIndex = displayOrder[row];
+        auto *frameItem = new QTableWidgetItem(QString::number(frameIndex + 1U));
+        frameItem->setData(Qt::UserRole, static_cast<qulonglong>(frameIndex));
+        auto *scoreItem = new QTableWidgetItem(
+            QString::number(scoreByIndex[static_cast<qsizetype>(frameIndex)], 'f', 1));
+        auto *keepItem = new QTableWidgetItem(
+            accepted.contains(frameIndex) ? tr("Yes") : tr("No"));
+        if (!accepted.contains(frameIndex)) {
+            const QBrush muted(QColor(QStringLiteral("#7d838c")));
+            frameItem->setForeground(muted);
+            scoreItem->setForeground(muted);
+            keepItem->setForeground(muted);
+        }
+        m_qualityTable->setItem(static_cast<int>(row), 0, frameItem);
+        m_qualityTable->setItem(static_cast<int>(row), 1, scoreItem);
+        m_qualityTable->setItem(static_cast<int>(row), 2, keepItem);
+    }
+    const std::uint32_t cutoffIndex = m_qualityResult.rankedFrameIndices[keepCount - 1];
+    const std::uint32_t bestIndex = m_qualityResult.rankedFrameIndices.front();
+    m_qualityLabel->setText(
+        tr("Keep %1 of %2 frames; discard %3. Cutoff score: %4. Best frame: %5 (%6).")
+            .arg(keepCount).arg(total).arg(total - keepCount)
+            .arg(scoreByIndex[static_cast<qsizetype>(cutoffIndex)], 0, 'f', 1)
+            .arg(bestIndex + 1U)
+            .arg(scoreByIndex[static_cast<qsizetype>(bestIndex)], 0, 'f', 1));
+    if (m_exportSummary) {
+        m_exportSummary->setText(
+            tr("Export selection: %1 of %2 frames, in %3. A timestamped subfolder will be created beside the source.")
+                .arg(keepCount).arg(total)
+                .arg(m_qualityOrder->currentData().toInt() == 1
+                         ? tr("quality-score order") : tr("capture order")));
+    }
+}
+
+void MainWindow::startExport()
+{
+    if (!m_serFile.isOpen() || m_exportWatcher->isRunning()) return;
+
+    QVector<std::uint32_t> frameIndices;
+    if (!m_qualityResult.isEmpty()) {
+        const int total = static_cast<int>(m_qualityResult.frames.size());
+        const int keepCount = std::clamp(static_cast<int>(std::ceil(
+            total * m_qualityKeep->currentData().toInt() / 100.0)), 1, total);
+        frameIndices.reserve(keepCount);
+        for (int rank = 0; rank < keepCount; ++rank)
+            frameIndices.append(m_qualityResult.rankedFrameIndices[rank]);
+        if (m_qualityOrder->currentData().toInt() == 0)
+            std::sort(frameIndices.begin(), frameIndices.end());
+    } else {
+        frameIndices.reserve(static_cast<qsizetype>(m_serFile.header().frameCount));
+        for (std::uint32_t index = 0; index < m_serFile.header().frameCount; ++index)
+            frameIndices.append(index);
+    }
+
+    seeingforge::DetectionResult referenceDetection = m_detection;
+    if (!referenceDetection.found()) {
+        referenceDetection = seeingforge::ObjectDetector::detect(
+            m_rawFrame, m_detectionThreshold->value(), m_cropMargin->currentData().toInt());
+    }
+    QSize outputSize(static_cast<int>(m_serFile.header().width),
+                     static_cast<int>(m_serFile.header().height));
+    if (referenceDetection.found()) {
+        const int margin = m_cropMargin->currentData().toInt();
+        outputSize = QSize(
+            std::min(static_cast<int>(m_serFile.header().width),
+                     referenceDetection.objectRect.width()
+                         + 2 * qRound(referenceDetection.objectRect.width() * margin / 100.0)),
+            std::min(static_cast<int>(m_serFile.header().height),
+                     referenceDetection.objectRect.height()
+                         + 2 * qRound(referenceDetection.objectRect.height() * margin / 100.0)));
+    }
+
+    const QFileInfo sourceInfo(m_serFile.path());
+    const QString baseFolder = QStringLiteral("seeingforge_%1").arg(
+        QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmm")));
+    QDir parent(sourceInfo.absolutePath());
+    QString folderName = baseFolder;
+    int suffix = 2;
+    while (parent.exists(folderName))
+        folderName = QStringLiteral("%1_%2").arg(baseFolder).arg(suffix++);
+    if (!parent.mkpath(folderName)) {
+        QMessageBox::critical(this, tr("Cannot Export"),
+                              tr("Could not create the export folder beside the source recording."));
+        return;
+    }
+    const QString outputPath = parent.filePath(folderName + QLatin1Char('/')
+                                                + sourceInfo.fileName());
+    seeingforge::SerExportSettings settings;
+    settings.frameIndices = frameIndices;
+    settings.centerObject = true;
+    settings.monochrome = m_exportMonochrome->isChecked();
+    settings.binMonochrome = settings.monochrome && m_exportMonoBinning->isChecked();
+    settings.detectionThreshold = m_detectionThreshold->value();
+    settings.outputSize = outputSize;
+    const seeingforge::SerFile source = m_serFile;
+
+    m_exportButton->setEnabled(false);
+    m_cancelExport->setEnabled(true);
+    m_exportProgress->setRange(0, frameIndices.size());
+    m_exportProgress->setValue(0);
+    m_exportProgress->show();
+    m_exportResultLabel->setText(tr("Exporting and centering frames…"));
+    statusBar()->showMessage(tr("Exporting SER recording…"));
+    m_exportCancel = std::make_shared<std::atomic_bool>(false);
+    const auto cancelFlag = m_exportCancel;
+    m_exportWatcher->setFuture(QtConcurrent::run(
+        [source, outputPath, settings, cancelFlag](QPromise<seeingforge::ExportResult> &promise) {
+            promise.setProgressRange(0, settings.frameIndices.size());
+            auto result = seeingforge::SerExporter::exportFrames(
+                source, outputPath, settings,
+                [&promise](int completed, int) { promise.setProgressValue(completed); },
+                [cancelFlag] { return cancelFlag->load(); });
+            promise.addResult(std::move(result));
+        }));
+}
+
+void MainWindow::exportFinished()
+{
+    const seeingforge::ExportResult result = m_exportWatcher->result();
+    m_exportButton->setEnabled(true);
+    m_cancelExport->setEnabled(false);
+    m_exportProgress->hide();
+    if (result.canceled) {
+        m_exportResultLabel->setText(tr("Export canceled. No partial SER file was saved."));
+        statusBar()->showMessage(tr("Export canceled."), 5000);
+        return;
+    }
+    if (!result.success) {
+        m_exportResultLabel->setText(tr("Export failed: %1").arg(result.error));
+        statusBar()->showMessage(tr("Export failed."), 5000);
+        return;
+    }
+    m_exportResultLabel->setText(
+        tr("Exported %1 centered frames to:\n%2%3")
+            .arg(result.exportedFrames).arg(result.outputPath)
+            .arg(result.timestampsPreserved ? tr("\nFrame timestamps preserved.") : QString()));
+    statusBar()->showMessage(tr("SER export complete."), 5000);
+}
+
+void MainWindow::cancelExport()
+{
+    if (!m_exportWatcher->isRunning() || !m_exportCancel) return;
+    m_exportCancel->store(true);
+    m_cancelExport->setEnabled(false);
+    m_exportResultLabel->setText(tr("Canceling after the current frame…"));
+}
+
+void MainWindow::previewModeChanged()
+{
+    if (m_previewMode->checkedId() == 2) {
+        m_fitToWindow = false;
+        m_zoomFactor = 1.0;
+        m_fitAction->setChecked(false);
+        if (m_zoomLabel) m_zoomLabel->setText(QStringLiteral("100%"));
+        statusBar()->showMessage(tr("Raw CFA mosaic is shown at 1:1; its pixel pattern is expected."), 5000);
+    }
+    updateImage();
+}
+void MainWindow::loadSelectedFrame() { loadFrame(static_cast<std::uint32_t>(m_frameSlider->value())); }
+
+void MainWindow::selectWorkflowStep(int row)
+{
+    if (row >= 0 && row < m_inspectorStack->count()) {
+        m_inspectorStack->setCurrentIndex(row);
+        if (row == 3) updateDetection();
+        else updateImage();
+    }
+}
+
+void MainWindow::fitImage()
+{
+    m_fitToWindow = true;
+    m_fitAction->setChecked(true);
+    if (m_zoomLabel) m_zoomLabel->setText(tr("Fit"));
+    updateImage();
+}
+
+void MainWindow::showActualSize()
+{
+    m_fitToWindow = false;
+    m_zoomFactor = 1.0;
+    m_fitAction->setChecked(false);
+    if (m_zoomLabel) m_zoomLabel->setText(QStringLiteral("100%"));
+    updateImage();
+}
+
+void MainWindow::zoomIn()
+{
+    m_fitToWindow = false;
+    m_fitAction->setChecked(false);
+    m_zoomFactor = std::min(m_zoomFactor * 1.25, 8.0);
+    if (m_zoomLabel) m_zoomLabel->setText(QStringLiteral("%1%").arg(qRound(m_zoomFactor * 100.0)));
+    updateImage();
+}
+
+void MainWindow::zoomOut()
+{
+    m_fitToWindow = false;
+    m_fitAction->setChecked(false);
+    m_zoomFactor = std::max(m_zoomFactor / 1.25, 0.1);
+    if (m_zoomLabel) m_zoomLabel->setText(QStringLiteral("%1%").arg(qRound(m_zoomFactor * 100.0)));
+    updateImage();
+}
+
+void MainWindow::updateImage()
+{
+    QImage image;
+    switch (m_previewMode->checkedId()) {
+    case 1: image = m_previews.rawLuminance; break;
+    case 2: image = m_previews.rawMosaic; break;
+    default: image = m_previews.processed; break;
+    }
+    if (image.isNull()) return;
+    if (m_workflowList->currentRow() == 3 && m_showDetection
+        && m_showDetection->isChecked() && m_detection.found()) {
+        image = image.copy();
+        const double scaleX = static_cast<double>(image.width()) / m_rawFrame.width();
+        const double scaleY = static_cast<double>(image.height()) / m_rawFrame.height();
+        auto scaledRect = [scaleX, scaleY](const QRect &rect) {
+            return QRectF(rect.x() * scaleX, rect.y() * scaleY,
+                          rect.width() * scaleX, rect.height() * scaleY);
+        };
+        QPainter painter(&image);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        QPen cropPen(QColor(QStringLiteral("#f0c64f")), 3);
+        QPen objectPen(QColor(QStringLiteral("#52d273")), 3);
+        painter.setPen(cropPen);
+        painter.drawRect(scaledRect(m_detection.cropRect));
+        painter.setPen(objectPen);
+        painter.drawRect(scaledRect(m_detection.objectRect));
+    }
+    if (m_workflowList->currentRow() == 1 && m_showHotPixels
+        && m_showHotPixels->isChecked() && !m_hotPixels.hotPixels.isEmpty()) {
+        image = image.copy();
+        const double scaleX = static_cast<double>(image.width()) / m_rawFrame.width();
+        const double scaleY = static_cast<double>(image.height()) / m_rawFrame.height();
+        QPainter painter(&image);
+        painter.setPen(QPen(QColor(QStringLiteral("#ff4d5a")), 3));
+        for (const QPoint point : m_hotPixels.hotPixels) {
+            painter.drawPoint(QPointF(point.x() * scaleX, point.y() * scaleY));
+        }
+    }
+    if (!m_fitToWindow) {
+        const QSize zoomedSize(
+            std::max(1, qRound(image.width() * m_zoomFactor)),
+            std::max(1, qRound(image.height() * m_zoomFactor)));
+        const QImage shown = qFuzzyCompare(m_zoomFactor, 1.0)
+            ? image
+            : image.scaled(zoomedSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        m_imageLabel->setPixmap(QPixmap::fromImage(shown));
+        m_imageLabel->setFixedSize(shown.size());
+        m_previewCanvas->setMinimumSize(shown.width() + 48, shown.height() + 48);
+        m_previewCanvas->updateGeometry();
+        centerPreview();
+        return;
+    }
+    m_previewCanvas->setMinimumSize(0, 0);
+    QSize available = m_previewScrollArea->maximumViewportSize() - QSize(48, 48);
+    available.setWidth(std::max(available.width(), 1));
+    available.setHeight(std::max(available.height(), 1));
+    const QImage shown = image.scaled(available, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    m_imageLabel->setPixmap(QPixmap::fromImage(shown));
+    m_imageLabel->setFixedSize(shown.size());
+    m_previewCanvas->updateGeometry();
+    centerPreview();
+}
+
+void MainWindow::centerPreview()
+{
+    if (!m_previewScrollArea) return;
+    QTimer::singleShot(0, this, [this] {
+        auto *horizontal = m_previewScrollArea->horizontalScrollBar();
+        auto *vertical = m_previewScrollArea->verticalScrollBar();
+        horizontal->setValue((horizontal->minimum() + horizontal->maximum()) / 2);
+        vertical->setValue((vertical->minimum() + vertical->maximum()) / 2);
+    });
+}
+
+void MainWindow::updateMetadata()
+{
+    if (!m_metadataTable) return;
+    if (!m_serFile.isOpen()) {
+        for (int row = 0; row < m_metadataTable->rowCount(); ++row)
+            setMetadataRow(row, row == 0 ? tr("Status") : QString(), row == 0 ? tr("No recording loaded") : QString());
+        return;
+    }
+    const auto &header = m_serFile.header();
+    setMetadataRow(0, tr("File"), QFileInfo(m_serFile.path()).fileName());
+    setMetadataRow(1, tr("Dimensions"), tr("%1 × %2 px").arg(header.width).arg(header.height));
+    setMetadataRow(2, tr("Frames"), QString::number(header.frameCount));
+    setMetadataRow(3, tr("Pixel depth"), tr("%1-bit").arg(header.pixelDepth));
+    setMetadataRow(4, tr("Colour format"), header.colorName());
+    setMetadataRow(5, tr("Identifier"), header.fileId);
+    setMetadataRow(6, tr("Observer"), header.observer.isEmpty() ? tr("—") : header.observer);
+    setMetadataRow(7, tr("Instrument"), header.instrument.isEmpty() ? tr("—") : header.instrument);
+    setMetadataRow(8, tr("Telescope"), header.telescope.isEmpty() ? tr("—") : header.telescope);
+    setMetadataRow(9, tr("Frame size"), tr("%1 bytes").arg(header.bytesPerFrame()));
+}
+
+void MainWindow::setMetadataRow(int row, const QString &name, const QString &value)
+{
+    m_metadataTable->setItem(row, 0, new QTableWidgetItem(name));
+    m_metadataTable->setItem(row, 1, new QTableWidgetItem(value));
+}
+
+void MainWindow::showAbout()
+{
+    QMessageBox::about(this, tr("About SeeingForge"),
+        tr("<h2>SeeingForge 0.1</h2><p>Open-source planetary imaging preparation.</p>"
+           "<p>This build provides guided SER preview and colour development.</p>"));
+}
+
+void MainWindow::resizeEvent(QResizeEvent *event)
+{
+    QMainWindow::resizeEvent(event);
+    if (m_fitToWindow) updateImage();
+}

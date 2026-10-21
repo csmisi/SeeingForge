@@ -1,0 +1,23 @@
+name: Feature request
+description: Propose a feature for maintainer review.
+title: "[Feature] "
+body:
+  - type: markdown
+    attributes:
+      value: Requests require maintainer approval and do not guarantee implementation or a timeline. Discuss a request before submitting code.
+  - type: textarea
+    id: workflow
+    attributes:
+      label: What workflow or problem would this address?
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What should SeeingForge do?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and additional context

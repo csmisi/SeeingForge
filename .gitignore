@@ -1,0 +1,7 @@
+/build*/
+/.cache/
+/.qtcreator/
+*.user
+*.autosave
+compile_commands.json
+
