@@ -30,14 +30,37 @@ jobs:
         run: cmake --build build
       - name: Test
         run: ctest --test-dir build --output-on-failure
-      - name: Install deployable application
-        run: cmake --install build --prefix "$GITHUB_WORKSPACE/stage"
-      - name: Package
-        run: tar -C stage -czf SeeingForge-${{ github.ref_name }}-linux-x64.tar.gz .
+      - name: Install AppImage packaging tools
+        run: |
+          mkdir -p packaging-tools
+          curl -L --fail --retry 3 -o packaging-tools/linuxdeploy-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          curl -L --fail --retry 3 -o packaging-tools/linuxdeploy-plugin-qt-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x packaging-tools/*.AppImage
+      - name: Build AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          OUTPUT: SeeingForge-${{ github.ref_name }}-linux-x86_64.AppImage
+        run: |
+          export PATH="$GITHUB_WORKSPACE/packaging-tools:$PATH"
+          linuxdeploy-x86_64.AppImage \
+            --appdir AppDir \
+            --executable build/SeeingForge \
+            --desktop-file packaging/SeeingForge.desktop \
+            --icon-file packaging/seeingforge.svg \
+            --plugin qt \
+            --output appimage
+      - name: Verify Qt platform plugins
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          ./SeeingForge-${{ github.ref_name }}-linux-x86_64.AppImage --appimage-extract
+          test -f squashfs-root/usr/plugins/platforms/libqxcb.so
       - uses: actions/upload-artifact@v4
         with:
           name: seeingforge-linux-x64
-          path: SeeingForge-${{ github.ref_name }}-linux-x64.tar.gz
+          path: SeeingForge-${{ github.ref_name }}-linux-x86_64.AppImage
           if-no-files-found: error
 
   windows:

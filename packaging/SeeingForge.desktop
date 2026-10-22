@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=SeeingForge
+Comment=Prepare planetary and lunar SER recordings for stacking
+Exec=SeeingForge
+Icon=seeingforge
+Categories=Education;Science;Astronomy;
+Terminal=false
+

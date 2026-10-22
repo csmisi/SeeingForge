@@ -46,8 +46,9 @@ Exports go beside the source in a `seeingforge_yyyymmdd_hhmm` folder; repeated e
 ## Build
 
 Ready-to-run packages for Linux, Windows, and macOS are available from the
-[GitHub Releases](https://github.com/csmisi/SeeingForge/releases) page. Windows
-and macOS packages are currently unsigned test builds and may show an operating
+[GitHub Releases](https://github.com/csmisi/SeeingForge/releases) page. The
+Linux download is an AppImage: make it executable, then launch it. Windows and
+macOS packages are currently unsigned test builds and may show an operating
 system security warning on first launch.
 
 ### Build from source
