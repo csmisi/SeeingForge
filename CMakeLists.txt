@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(SeeingForge VERSION 0.1.1 LANGUAGES CXX)
+project(SeeingForge VERSION 0.1.2 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 

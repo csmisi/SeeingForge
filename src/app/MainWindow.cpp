@@ -613,7 +613,7 @@ QWidget *MainWindow::createStabilizeInspector()
     m_outputSizeMode->addItem(tr("640 × 480"), QSize(640, 480));
     m_outputSizeMode->addItem(tr("800 × 600"), QSize(800, 600));
     m_outputSizeMode->addItem(tr("1024 × 768"), QSize(1024, 768));
-    m_outputSizeMode->addItem(tr("Custom dimensions"), QSize(-1, -1));
+    m_outputSizeMode->addItem(tr("Custom dimensions"), QSize(-2, -2));
     layout->addWidget(m_outputSizeMode);
     auto *customSize = new QHBoxLayout;
     m_customOutputWidth = new QSpinBox(page);
@@ -630,7 +630,7 @@ QWidget *MainWindow::createStabilizeInspector()
     customSize->addWidget(m_customOutputHeight);
     layout->addLayout(customSize);
     connect(m_outputSizeMode, &QComboBox::currentIndexChanged, this, [this] {
-        const bool custom = m_outputSizeMode->currentData().toSize() == QSize(-1, -1);
+        const bool custom = m_outputSizeMode->currentData().toSize() == QSize(-2, -2);
         m_customOutputWidth->setEnabled(custom);
         m_customOutputHeight->setEnabled(custom);
     });
@@ -680,6 +680,10 @@ QWidget *MainWindow::createQualityInspector()
     qualityButtons->addWidget(m_cancelQuality);
     layout->addLayout(qualityButtons);
     m_qualityProgress = new QProgressBar(page);
+    m_qualityProgress->setMinimumHeight(20);
+    m_qualityProgress->setStyleSheet(QStringLiteral(
+        "QProgressBar { border: 1px solid #69717d; border-radius: 3px; background: #252930; text-align: center; color: white; }"
+        "QProgressBar::chunk { background: #387fb5; }"));
     m_qualityProgress->setTextVisible(true);
     m_qualityProgress->setFormat(tr("%v / %m frames (%p%)"));
     m_qualityProgress->hide();
@@ -821,6 +825,10 @@ QWidget *MainWindow::createExportInspector()
     exportButtons->addWidget(m_cancelExport);
     layout->addLayout(exportButtons);
     m_exportProgress = new QProgressBar(page);
+    m_exportProgress->setMinimumHeight(20);
+    m_exportProgress->setStyleSheet(QStringLiteral(
+        "QProgressBar { border: 1px solid #69717d; border-radius: 3px; background: #252930; text-align: center; color: white; }"
+        "QProgressBar::chunk { background: #387fb5; }"));
     m_exportProgress->setFormat(tr("%v / %m frames (%p%)"));
     m_exportProgress->hide();
     layout->addWidget(m_exportProgress);
@@ -1207,7 +1215,7 @@ void MainWindow::startExport()
                          + 2 * qRound(referenceDetection.objectRect.height() * margin / 100.0)));
     }
     QSize requestedSize = m_outputSizeMode->currentData().toSize();
-    if (requestedSize == QSize(-1, -1))
+    if (requestedSize == QSize(-2, -2))
         requestedSize = QSize(m_customOutputWidth->value(), m_customOutputHeight->value());
     if (requestedSize.isValid()) {
         outputSize = QSize(std::min(requestedSize.width(),
