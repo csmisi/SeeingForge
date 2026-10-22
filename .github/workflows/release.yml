@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  QT_VERSION: "6.8.3"
+
+jobs:
+  linux:
+    name: Linux x64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4.3.1
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: linux_gcc_64
+          cache: true
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Install deployable application
+        run: cmake --install build --prefix stage
+      - name: Package
+        run: tar -C stage -czf SeeingForge-${{ github.ref_name }}-linux-x64.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seeingforge-linux-x64
+          path: SeeingForge-${{ github.ref_name }}-linux-x64.tar.gz
+          if-no-files-found: error
+
+  windows:
+    name: Windows x64
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4.3.1
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: win64_msvc2022_64
+          cache: true
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Install deployable application
+        run: cmake --install build --prefix stage
+      - name: Package
+        shell: pwsh
+        run: Compress-Archive -Path stage\* -DestinationPath SeeingForge-${{ github.ref_name }}-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seeingforge-windows-x64
+          path: SeeingForge-${{ github.ref_name }}-windows-x64.zip
+          if-no-files-found: error
+
+  macos:
+    name: macOS Intel
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4.3.1
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: clang_64
+          cache: true
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Install deployable application
+        run: cmake --install build --prefix stage
+      - name: Ad-hoc sign application bundle
+        run: codesign --force --deep --sign - stage/SeeingForge.app
+      - name: Package disk image
+        run: hdiutil create -volname SeeingForge -srcfolder stage/SeeingForge.app -ov -format UDZO SeeingForge-${{ github.ref_name }}-macos-intel.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seeingforge-macos-intel
+          path: SeeingForge-${{ github.ref_name }}-macos-intel.dmg
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: seeingforge-*
+          path: artifacts
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${GITHUB_REF_NAME}"
+          artifacts/*
+          --repo "${GITHUB_REPOSITORY}"
+          --title "SeeingForge ${GITHUB_REF_NAME}"
+          --generate-notes

@@ -45,6 +45,13 @@ Exports go beside the source in a `seeingforge_yyyymmdd_hhmm` folder; repeated e
 
 ## Build
 
+Ready-to-run packages for Linux, Windows, and macOS are available from the
+[GitHub Releases](https://github.com/csmisi/SeeingForge/releases) page. Windows
+and macOS packages are currently unsigned test builds and may show an operating
+system security warning on first launch.
+
+### Build from source
+
 Requires a C++20 compiler, CMake 3.25+, Ninja, and Qt 6.6+ with Core, Gui, Widgets, Concurrent, and Test. On Fedora 44:
 
 ```bash

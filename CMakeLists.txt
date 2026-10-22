@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.25)
 
 project(SeeingForge VERSION 0.1.0 LANGUAGES CXX)
 
+include(GNUInstallDirs)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -29,12 +31,19 @@ target_compile_options(seeingforge_core PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Wconversion>
 )
 
-add_executable(seeingforge
+add_executable(seeingforge WIN32 MACOSX_BUNDLE
     src/app/main.cpp
     src/app/MainWindow.cpp
     src/app/MainWindow.h
 )
 target_link_libraries(seeingforge PRIVATE seeingforge_core Qt6::Concurrent Qt6::Widgets)
+set_target_properties(seeingforge PROPERTIES
+    OUTPUT_NAME SeeingForge
+    MACOSX_BUNDLE_BUNDLE_NAME SeeingForge
+    MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
+    MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION}
+    MACOSX_BUNDLE_GUI_IDENTIFIER org.seeingforge.SeeingForge
+)
 
 add_executable(seeingforge_ser_probe tools/SerProbe.cpp)
 target_link_libraries(seeingforge_ser_probe PRIVATE seeingforge_core Qt6::Core)
@@ -47,4 +56,14 @@ if(BUILD_TESTING)
     set_tests_properties(serfile_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
 
-install(TARGETS seeingforge RUNTIME DESTINATION bin BUNDLE DESTINATION .)
+install(TARGETS seeingforge
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    BUNDLE DESTINATION .
+)
+
+qt_generate_deploy_app_script(
+    TARGET seeingforge
+    OUTPUT_SCRIPT seeingforge_deploy_script
+    NO_UNSUPPORTED_PLATFORM_ERROR
+)
+install(SCRIPT ${seeingforge_deploy_script})
