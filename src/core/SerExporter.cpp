@@ -31,6 +31,51 @@ void writeSample(char *bytes, quint16 value, int bytesPerSample, bool bigEndian)
     else qToLittleEndian(value, raw);
 }
 
+QByteArray orientFrame(const QByteArray &source, int width, int height, int bytesPerPixel,
+                       int quarterTurns, bool flipHorizontal, bool flipVertical)
+{
+    const int turns = quarterTurns & 3;
+    const int outputWidth = (turns & 1) != 0 ? height : width;
+    const int outputHeight = (turns & 1) != 0 ? width : height;
+    QByteArray output(static_cast<qsizetype>(outputWidth) * outputHeight * bytesPerPixel, '\0');
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            int destinationX = x;
+            int destinationY = y;
+            if (turns == 1) { destinationX = height - 1 - y; destinationY = x; }
+            else if (turns == 2) { destinationX = width - 1 - x; destinationY = height - 1 - y; }
+            else if (turns == 3) { destinationX = y; destinationY = width - 1 - x; }
+            if (flipHorizontal) destinationX = outputWidth - 1 - destinationX;
+            if (flipVertical) destinationY = outputHeight - 1 - destinationY;
+            std::memcpy(output.data()
+                            + (static_cast<qsizetype>(destinationY) * outputWidth + destinationX)
+                                  * bytesPerPixel,
+                        source.constData()
+                            + (static_cast<qsizetype>(y) * width + x) * bytesPerPixel,
+                        static_cast<std::size_t>(bytesPerPixel));
+        }
+    }
+    return output;
+}
+
+quint32 orientedBayerColorId(quint32 colorId, int quarterTurns,
+                             bool flipHorizontal, bool flipVertical)
+{
+    if (!((colorId >= 8 && colorId <= 11) || (colorId >= 16 && colorId <= 19)))
+        return colorId;
+    const quint32 base = colorId >= 16 ? 16U : 8U;
+    const quint32 pattern = colorId - base;
+    int x = (pattern & 1U) != 0 ? 1 : 0;
+    int y = (pattern & 2U) != 0 ? 1 : 0;
+    const int turns = quarterTurns & 3;
+    if (turns == 1) { const int oldX = x; x = 1 - y; y = oldX; }
+    else if (turns == 2) { x = 1 - x; y = 1 - y; }
+    else if (turns == 3) { const int oldX = x; x = y; y = 1 - oldX; }
+    if (flipHorizontal) x = 1 - x;
+    if (flipVertical) y = 1 - y;
+    return base + static_cast<quint32>(x + 2 * y);
+}
+
 } // namespace
 
 ExportResult SerExporter::exportFrames(
@@ -87,12 +132,21 @@ ExportResult SerExporter::exportFrames(
         ? outputWidth / 2 : outputWidth;
     const int finalHeight = binOutput
         ? outputHeight / 2 : outputHeight;
+    const bool rotateSides = (settings.rotationQuarterTurns & 1) != 0;
+    const int orientedWidth = rotateSides ? finalHeight : finalWidth;
+    const int orientedHeight = rotateSides ? finalWidth : finalHeight;
     if (settings.monochrome) {
         qToLittleEndian<quint32>(0, reinterpret_cast<uchar *>(header.data() + 18));
+    } else if (bayerSource) {
+        qToLittleEndian(orientedBayerColorId(source.header().colorId,
+                                             settings.rotationQuarterTurns,
+                                             settings.flipHorizontal,
+                                             settings.flipVertical),
+                        reinterpret_cast<uchar *>(header.data() + 18));
     }
-    qToLittleEndian(static_cast<quint32>(finalWidth),
+    qToLittleEndian(static_cast<quint32>(orientedWidth),
                     reinterpret_cast<uchar *>(header.data() + 26));
-    qToLittleEndian(static_cast<quint32>(finalHeight),
+    qToLittleEndian(static_cast<quint32>(orientedHeight),
                     reinterpret_cast<uchar *>(header.data() + 30));
     qToLittleEndian(static_cast<quint32>(settings.frameIndices.size()),
                     reinterpret_cast<uchar *>(header.data() + 38));
@@ -263,6 +317,13 @@ ExportResult SerExporter::exportFrames(
                 }
             }
             exportFrame = std::move(binned);
+        }
+        if ((settings.rotationQuarterTurns & 3) != 0
+            || settings.flipHorizontal || settings.flipVertical) {
+            exportFrame = orientFrame(exportFrame, finalWidth, finalHeight,
+                                      settings.monochrome ? bytesPerSample : bytesPerPixel,
+                                      settings.rotationQuarterTurns,
+                                      settings.flipHorizontal, settings.flipVertical);
         }
         if (output.write(exportFrame) != exportFrame.size()) {
             result.error = QStringLiteral("Could not write output frame %1.").arg(index + 1U);

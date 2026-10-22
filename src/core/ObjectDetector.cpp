@@ -73,6 +73,9 @@ DetectionResult ObjectDetector::detect(const QImage &frame, int threshold,
         std::max(1, static_cast<int>(best.height() * scaleY)));
     objectRect = objectRect.intersected(frame.rect());
 
+    if (marginPercent < 0)
+        return {objectRect, frame.rect(), bestArea};
+
     const int marginX = qRound(objectRect.width() * marginPercent / 100.0);
     const int marginY = qRound(objectRect.height() * marginPercent / 100.0);
     const QRect cropRect = objectRect.adjusted(-marginX, -marginY, marginX, marginY)

@@ -1,6 +1,7 @@
 #include "core/PreviewProcessor.h"
 
 #include <QColor>
+#include <QTransform>
 
 #include <algorithm>
 #include <array>
@@ -13,6 +14,19 @@ enum class Channel { Red, Green, Blue };
 
 void applyWhiteBalance(QImage &image, double redAdjustment, double blueAdjustment)
 {
+    int brightest = 0;
+    for (int y = 0; y < image.height(); ++y) {
+        const uchar *line = image.constScanLine(y);
+        for (int x = 0; x < image.width(); ++x) {
+            const int byte = x * 3;
+            brightest = std::max(brightest, std::max({static_cast<int>(line[byte]),
+                                                       static_cast<int>(line[byte + 1]),
+                                                       static_cast<int>(line[byte + 2])}));
+        }
+    }
+    // Planetary targets often occupy much less than one percent of the frame.
+    // Measuring the near-black sky makes its colour noise drive the white balance.
+    const int foregroundFloor = std::max(8, brightest / 8);
     std::uint64_t redSum = 0, greenSum = 0, blueSum = 0, count = 0;
     for (int y = 0; y < image.height(); ++y) {
         const uchar *line = image.constScanLine(y);
@@ -21,7 +35,7 @@ void applyWhiteBalance(QImage &image, double redAdjustment, double blueAdjustmen
             const int red = line[byte];
             const int green = line[byte + 1];
             const int blue = line[byte + 2];
-            if (std::max({red, green, blue}) < 8) continue;
+            if (std::max({red, green, blue}) < foregroundFloor) continue;
             redSum += static_cast<std::uint64_t>(red);
             greenSum += static_cast<std::uint64_t>(green);
             blueSum += static_cast<std::uint64_t>(blue);
@@ -67,6 +81,39 @@ void applyColorAdjustment(QImage &image, double saturationScale, int hueShiftDeg
             line[byte + 2] = static_cast<uchar>(color.blue());
         }
     }
+}
+
+void applyToneAdjustment(QImage &image, double gain, double gamma)
+{
+    if (qFuzzyCompare(gain, 1.0) && qFuzzyCompare(gamma, 1.0)) return;
+    std::array<uchar, 256> lookup{};
+    const double inverseGamma = 1.0 / std::max(gamma, 0.01);
+    for (int value = 0; value < 256; ++value) {
+        const double normalized = std::clamp(value * gain / 255.0, 0.0, 1.0);
+        lookup[static_cast<std::size_t>(value)] = static_cast<uchar>(
+            std::lround(255.0 * std::pow(normalized, inverseGamma)));
+    }
+    const bool rgb = image.format() == QImage::Format_RGB888;
+    for (int y = 0; y < image.height(); ++y) {
+        uchar *line = image.scanLine(y);
+        const int count = image.width() * (rgb ? 3 : 1);
+        for (int index = 0; index < count; ++index)
+            line[index] = lookup[static_cast<std::size_t>(line[index])];
+    }
+}
+
+QImage orient(QImage image, const PreviewSettings &settings)
+{
+    QTransform transform;
+    transform.rotate(90.0 * (settings.rotationQuarterTurns & 3));
+    image = image.transformed(transform, Qt::FastTransformation);
+    if (settings.flipHorizontal || settings.flipVertical) {
+        QTransform flip;
+        flip.scale(settings.flipHorizontal ? -1.0 : 1.0,
+                   settings.flipVertical ? -1.0 : 1.0);
+        image = image.transformed(flip, Qt::FastTransformation);
+    }
+    return image;
 }
 
 Channel channelAt(int x, int y, std::uint32_t colorId)
@@ -180,12 +227,25 @@ QImage stretch(const QImage &source)
     std::uint64_t sampleCount = 0;
     for (int y = 0; y < source.height(); ++y) {
         const uchar *line = source.constScanLine(y);
-        const int count = source.width() * (rgb ? 3 : 1);
-        for (int index = 0; index < count; ++index) ++histogram[line[index]];
-        sampleCount += static_cast<std::uint64_t>(count);
+        for (int x = 0; x < source.width(); ++x) {
+            int value = line[x];
+            if (rgb) {
+                const int byte = x * 3;
+                // Stretch colour from luminance so a biased background channel
+                // cannot determine the limits or alter the colour balance.
+                value = (static_cast<int>(line[byte])
+                         + 2 * static_cast<int>(line[byte + 1])
+                         + static_cast<int>(line[byte + 2]) + 2) / 4;
+            }
+            ++histogram[static_cast<std::size_t>(value)];
+            ++sampleCount;
+        }
     }
     const std::uint64_t lowTarget = sampleCount / 200U;
-    const std::uint64_t highTarget = sampleCount - lowTarget;
+    // Ignore only the brightest 0.01%. A 99.5th-percentile upper limit clips
+    // compact planets whenever they cover less than 0.5% of a large sensor.
+    const std::uint64_t highTail = std::max<std::uint64_t>(1, sampleCount / 10000U);
+    const std::uint64_t highTarget = sampleCount - highTail;
     std::uint64_t cumulative = 0;
     int low = 0;
     int high = 255;
@@ -270,6 +330,10 @@ PreviewImages PreviewProcessor::render(const QImage &rawFrame,
     if (settings.autoStretch) result.processed = stretch(result.processed);
     applyColorAdjustment(result.processed, settings.saturation,
                          settings.hueShiftDegrees);
+    applyToneAdjustment(result.processed, settings.gain, settings.gamma);
+    result.processed = orient(std::move(result.processed), settings);
+    result.rawLuminance = orient(std::move(result.rawLuminance), settings);
+    result.rawMosaic = orient(std::move(result.rawMosaic), settings);
     return result;
 }
 

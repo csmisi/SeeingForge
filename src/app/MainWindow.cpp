@@ -17,6 +17,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPushButton>
 #include <QProgressBar>
 #include <QPromise>
@@ -24,7 +25,9 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSet>
+#include <QSettings>
 #include <QSlider>
+#include <QSpinBox>
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QTableWidget>
@@ -35,6 +38,61 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
+
+class QualityGraph final : public QWidget {
+public:
+    explicit QualityGraph(QWidget *parent = nullptr) : QWidget(parent)
+    {
+        setMinimumHeight(110);
+        setToolTip(tr("Relative frame quality. Higher is better."));
+    }
+
+    void setScores(QVector<double> scores)
+    {
+        m_scores = std::move(scores);
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.fillRect(rect(), QColor(QStringLiteral("#101317")));
+        const QRectF plot = QRectF(rect()).adjusted(36.0, 10.0, -10.0, -22.0);
+        painter.setPen(QColor(QStringLiteral("#39414a")));
+        painter.drawRect(plot);
+        painter.drawLine(plot.left(), plot.center().y(), plot.right(), plot.center().y());
+        painter.setPen(QColor(QStringLiteral("#aab2bd")));
+        painter.drawText(QRectF(2.0, plot.top() - 5.0, 32.0, 18.0),
+                         Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("100"));
+        painter.drawText(QRectF(2.0, plot.bottom() - 9.0, 32.0, 18.0),
+                         Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("0"));
+        painter.drawText(QRectF(plot.left(), plot.bottom() + 3.0, plot.width(), 18.0),
+                         Qt::AlignCenter, tr("Frames"));
+        if (m_scores.isEmpty()) {
+            painter.drawText(plot, Qt::AlignCenter, tr("Analyze frames to show the quality curve"));
+            return;
+        }
+
+        QPainterPath path;
+        for (qsizetype index = 0; index < m_scores.size(); ++index) {
+            const double fraction = m_scores.size() > 1
+                ? static_cast<double>(index) / static_cast<double>(m_scores.size() - 1) : 0.0;
+            const QPointF point(plot.left() + fraction * plot.width(),
+                                plot.bottom() - std::clamp(m_scores[index], 0.0, 100.0)
+                                                    / 100.0 * plot.height());
+            if (index == 0) path.moveTo(point);
+            else path.lineTo(point);
+        }
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setPen(QPen(QColor(QStringLiteral("#52d273")), 2.0));
+        painter.drawPath(path);
+    }
+
+private:
+    QVector<double> m_scores;
+};
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -389,6 +447,39 @@ QWidget *MainWindow::createColourInspector()
     layout->addWidget(hueLabel);
     layout->addWidget(m_hue);
 
+    auto addTone = [&](const QString &name, QSlider **member, int minimum,
+                       int maximum, int value) {
+        auto *label = new QLabel(QStringLiteral("%1: %2×").arg(name).arg(value / 100.0, 0, 'f', 2), page);
+        auto *slider = new QSlider(Qt::Horizontal, page);
+        slider->setRange(minimum, maximum);
+        slider->setValue(value);
+        connect(slider, &QSlider::valueChanged, this, [this, label, name](int current) {
+            label->setText(QStringLiteral("%1: %2×").arg(name).arg(current / 100.0, 0, 'f', 2));
+            requestPreviewRender();
+        });
+        layout->addWidget(label);
+        layout->addWidget(slider);
+        *member = slider;
+    };
+    addTone(tr("Preview gain"), &m_gain, 25, 400, 100);
+    addTone(tr("Preview gamma"), &m_gamma, 25, 300, 100);
+
+    layout->addWidget(new QLabel(tr("Orientation"), page));
+    m_orientation = new QComboBox(page);
+    m_orientation->addItem(tr("No rotation"), 0);
+    m_orientation->addItem(tr("Rotate 90° clockwise"), 1);
+    m_orientation->addItem(tr("Rotate 180°"), 2);
+    m_orientation->addItem(tr("Rotate 90° counter-clockwise"), 3);
+    connect(m_orientation, &QComboBox::currentIndexChanged,
+            this, &MainWindow::requestPreviewRender);
+    layout->addWidget(m_orientation);
+    m_flipHorizontal = new QCheckBox(tr("Flip horizontally"), page);
+    m_flipVertical = new QCheckBox(tr("Flip vertically"), page);
+    connect(m_flipHorizontal, &QCheckBox::toggled, this, &MainWindow::requestPreviewRender);
+    connect(m_flipVertical, &QCheckBox::toggled, this, &MainWindow::requestPreviewRender);
+    layout->addWidget(m_flipHorizontal);
+    layout->addWidget(m_flipVertical);
+
     m_autoStretch = new QCheckBox(tr("Auto-stretch preview"), page);
     m_autoStretch->setChecked(true);
     connect(m_autoStretch, &QCheckBox::toggled, this, &MainWindow::requestPreviewRender);
@@ -506,10 +597,48 @@ QWidget *MainWindow::createStabilizeInspector()
     m_cropMargin->addItem(tr("20% on each side — recommended"), 20);
     m_cropMargin->addItem(tr("30% on each side"), 30);
     m_cropMargin->addItem(tr("50% on each side"), 50);
+    m_cropMargin->addItem(tr("100% on each side — 3× object size"), 100);
+    m_cropMargin->addItem(tr("200% on each side — 5× object size"), 200);
+    m_cropMargin->addItem(tr("400% on each side — 9× object size"), 400);
+    m_cropMargin->addItem(tr("Keep the full source frame"), -1);
     m_cropMargin->setCurrentIndex(1);
     connect(m_cropMargin, &QComboBox::currentIndexChanged, this,
             [this] { if (m_detectionDebounce) m_detectionDebounce->start(); });
     layout->addWidget(m_cropMargin);
+
+    layout->addWidget(new QLabel(tr("Output dimensions"), page));
+    m_outputSizeMode = new QComboBox(page);
+    m_outputSizeMode->addItem(tr("Automatic from target and surrounding space"), QSize());
+    m_outputSizeMode->addItem(tr("320 × 240"), QSize(320, 240));
+    m_outputSizeMode->addItem(tr("640 × 480"), QSize(640, 480));
+    m_outputSizeMode->addItem(tr("800 × 600"), QSize(800, 600));
+    m_outputSizeMode->addItem(tr("1024 × 768"), QSize(1024, 768));
+    m_outputSizeMode->addItem(tr("Custom dimensions"), QSize(-1, -1));
+    layout->addWidget(m_outputSizeMode);
+    auto *customSize = new QHBoxLayout;
+    m_customOutputWidth = new QSpinBox(page);
+    m_customOutputHeight = new QSpinBox(page);
+    for (QSpinBox *box : {m_customOutputWidth, m_customOutputHeight}) {
+        box->setRange(2, 16384);
+        box->setSingleStep(2);
+        box->setEnabled(false);
+    }
+    m_customOutputWidth->setValue(640);
+    m_customOutputHeight->setValue(480);
+    customSize->addWidget(m_customOutputWidth);
+    customSize->addWidget(new QLabel(QStringLiteral("×"), page));
+    customSize->addWidget(m_customOutputHeight);
+    layout->addLayout(customSize);
+    connect(m_outputSizeMode, &QComboBox::currentIndexChanged, this, [this] {
+        const bool custom = m_outputSizeMode->currentData().toSize() == QSize(-1, -1);
+        m_customOutputWidth->setEnabled(custom);
+        m_customOutputHeight->setEnabled(custom);
+    });
+    auto *sizeNote = new QLabel(
+        tr("Fixed dimensions add surrounding space when available and never upscale the source."), page);
+    sizeNote->setWordWrap(true);
+    sizeNote->setStyleSheet(QStringLiteral("color: #aab2bd;"));
+    layout->addWidget(sizeNote);
 
     m_showDetection = new QCheckBox(tr("Show detection and recommended crop"), page);
     m_showDetection->setChecked(true);
@@ -537,7 +666,7 @@ QWidget *MainWindow::createQualityInspector()
     auto *layout = new QVBoxLayout(page);
     layout->setContentsMargins(18, 16, 18, 16);
     layout->addWidget(new QLabel(
-        tr("<h2>Quality</h2><p>Rank frames by fine detail, contrast, exposure stability, and clipping.</p>"), page));
+        tr("<h2>Quality</h2><p>Rank frames by target-local fine detail, contrast, exposure stability, and clipping.</p>"), page));
 
     m_analyzeQuality = new QPushButton(tr("Analyze all frames"), page);
     connect(m_analyzeQuality, &QPushButton::clicked,
@@ -568,6 +697,24 @@ QWidget *MainWindow::createQualityInspector()
             this, &MainWindow::updateQualityDisplay);
     layout->addWidget(m_qualityKeep);
 
+    m_rejectClipped = new QCheckBox(tr("Reject overexposed frames"), page);
+    m_rejectClipped->setChecked(true);
+    layout->addWidget(m_rejectClipped);
+    auto *clippedRow = new QHBoxLayout;
+    clippedRow->addWidget(new QLabel(tr("Maximum clipped target pixels"), page));
+    m_maxClippedPercent = new QSpinBox(page);
+    m_maxClippedPercent->setRange(1, 100);
+    m_maxClippedPercent->setValue(5);
+    m_maxClippedPercent->setSuffix(QStringLiteral("%"));
+    clippedRow->addWidget(m_maxClippedPercent);
+    layout->addLayout(clippedRow);
+    connect(m_rejectClipped, &QCheckBox::toggled,
+            m_maxClippedPercent, &QSpinBox::setEnabled);
+    connect(m_rejectClipped, &QCheckBox::toggled,
+            this, &MainWindow::updateQualityDisplay);
+    connect(m_maxClippedPercent, &QSpinBox::valueChanged,
+            this, &MainWindow::updateQualityDisplay);
+
     layout->addWidget(new QLabel(tr("Frame order"), page));
     m_qualityOrder = new QComboBox(page);
     m_qualityOrder->addItem(tr("Original capture order"), 0);
@@ -580,6 +727,9 @@ QWidget *MainWindow::createQualityInspector()
     m_qualityLabel->setWordWrap(true);
     m_qualityLabel->setStyleSheet(QStringLiteral("color: #aab2bd;"));
     layout->addWidget(m_qualityLabel);
+
+    m_qualityGraph = new QualityGraph(page);
+    layout->addWidget(m_qualityGraph);
 
     m_qualityTable = new QTableWidget(0, 3, page);
     m_qualityTable->setHorizontalHeaderLabels({tr("Frame"), tr("Score"), tr("Keep")});
@@ -684,15 +834,21 @@ QWidget *MainWindow::createExportInspector()
 
 void MainWindow::openSerFile()
 {
+    QSettings settings;
+    const QString savedFolder = settings.value(
+        QStringLiteral("files/lastOpenFolder")).toString();
+    const QString initialFolder = QDir(savedFolder).exists()
+        ? savedFolder
+        : (m_serFile.isOpen() ? QFileInfo(m_serFile.path()).absolutePath()
+                              : QDir::homePath());
+
     QFileDialog dialog(this, tr("Open SER Recording"));
     dialog.setOption(QFileDialog::DontUseNativeDialog, true);
     dialog.setFileMode(QFileDialog::ExistingFile);
     dialog.setAcceptMode(QFileDialog::AcceptOpen);
     dialog.setNameFilters({tr("SER recordings (*.ser *.SER)"), tr("All files (*)")});
     dialog.setViewMode(QFileDialog::Detail);
-    dialog.setDirectory(m_serFile.isOpen()
-                            ? QFileInfo(m_serFile.path()).absolutePath()
-                            : QDir::homePath());
+    dialog.setDirectory(initialFolder);
     dialog.resize(1050, 650);
     if (dialog.exec() == QDialog::Accepted && !dialog.selectedFiles().isEmpty())
         loadSerFile(dialog.selectedFiles().constFirst());
@@ -704,6 +860,9 @@ void MainWindow::loadSerFile(const QString &path)
         QMessageBox::critical(this, tr("Cannot Open SER File"), m_serFile.errorString());
         return;
     }
+    QSettings settings;
+    settings.setValue(QStringLiteral("files/lastOpenFolder"),
+                      QFileInfo(path).absolutePath());
     m_currentFrame = 0;
     m_frameSlider->setRange(0, static_cast<int>(m_serFile.header().frameCount - 1));
     m_frameSlider->setValue(0);
@@ -714,6 +873,7 @@ void MainWindow::loadSerFile(const QString &path)
     m_hotPixelLabel->setText(tr("Analysis has not been run."));
     m_qualityResult = {};
     m_qualityTable->setRowCount(0);
+    m_qualityGraph->setScores({});
     m_qualityLabel->setText(tr("Quality has not been analyzed."));
     m_workflowList->setCurrentRow(0);
     loadFrame(0);
@@ -747,6 +907,11 @@ seeingforge::PreviewSettings MainWindow::previewSettings() const
     settings.blueBalance = m_blueBalance->value() / 100.0;
     settings.saturation = m_saturation->value() / 100.0;
     settings.hueShiftDegrees = m_hue->value();
+    settings.gain = m_gain->value() / 100.0;
+    settings.gamma = m_gamma->value() / 100.0;
+    settings.rotationQuarterTurns = m_orientation->currentData().toInt();
+    settings.flipHorizontal = m_flipHorizontal->isChecked();
+    settings.flipVertical = m_flipVertical->isChecked();
     return settings;
 }
 
@@ -905,13 +1070,25 @@ void MainWindow::updateQualityDisplay()
 {
     if (m_qualityResult.isEmpty() || !m_qualityTable) return;
     const int total = static_cast<int>(m_qualityResult.frames.size());
+    QVector<double> clippedByIndex(
+        static_cast<qsizetype>(m_serFile.header().frameCount), 0.0);
+    for (const auto &frame : m_qualityResult.frames)
+        clippedByIndex[static_cast<qsizetype>(frame.frameIndex)] = frame.clippedPercent;
+    QVector<std::uint32_t> eligibleFrames;
+    for (const std::uint32_t frameIndex : m_qualityResult.rankedFrameIndices) {
+        if (!m_rejectClipped->isChecked()
+            || clippedByIndex[static_cast<qsizetype>(frameIndex)]
+                   <= m_maxClippedPercent->value())
+            eligibleFrames.append(frameIndex);
+    }
     const int keepPercent = m_qualityKeep->currentData().toInt();
-    const int keepCount = std::clamp(
-        static_cast<int>(std::ceil(total * keepPercent / 100.0)), 1, total);
+    const int keepCount = eligibleFrames.isEmpty() ? 0 : std::clamp(
+        static_cast<int>(std::ceil(eligibleFrames.size() * keepPercent / 100.0)),
+        1, static_cast<int>(eligibleFrames.size()));
 
     QSet<std::uint32_t> accepted;
     for (int rank = 0; rank < keepCount; ++rank)
-        accepted.insert(m_qualityResult.rankedFrameIndices[rank]);
+        accepted.insert(eligibleFrames[rank]);
 
     QVector<double> scoreByIndex(
         static_cast<qsizetype>(m_serFile.header().frameCount), 0.0);
@@ -929,14 +1106,20 @@ void MainWindow::updateQualityDisplay()
 
     m_qualityTable->setSortingEnabled(false);
     m_qualityTable->setRowCount(displayOrder.size());
+    QVector<double> displayedScores;
+    displayedScores.reserve(displayOrder.size());
     for (qsizetype row = 0; row < displayOrder.size(); ++row) {
         const std::uint32_t frameIndex = displayOrder[row];
+        displayedScores.append(scoreByIndex[static_cast<qsizetype>(frameIndex)]);
         auto *frameItem = new QTableWidgetItem(QString::number(frameIndex + 1U));
         frameItem->setData(Qt::UserRole, static_cast<qulonglong>(frameIndex));
         auto *scoreItem = new QTableWidgetItem(
             QString::number(scoreByIndex[static_cast<qsizetype>(frameIndex)], 'f', 1));
-        auto *keepItem = new QTableWidgetItem(
-            accepted.contains(frameIndex) ? tr("Yes") : tr("No"));
+        const bool clippedRejected = m_rejectClipped->isChecked()
+            && clippedByIndex[static_cast<qsizetype>(frameIndex)]
+                   > m_maxClippedPercent->value();
+        auto *keepItem = new QTableWidgetItem(clippedRejected ? tr("Clipped")
+            : (accepted.contains(frameIndex) ? tr("Yes") : tr("No")));
         if (!accepted.contains(frameIndex)) {
             const QBrush muted(QColor(QStringLiteral("#7d838c")));
             frameItem->setForeground(muted);
@@ -947,11 +1130,17 @@ void MainWindow::updateQualityDisplay()
         m_qualityTable->setItem(static_cast<int>(row), 1, scoreItem);
         m_qualityTable->setItem(static_cast<int>(row), 2, keepItem);
     }
-    const std::uint32_t cutoffIndex = m_qualityResult.rankedFrameIndices[keepCount - 1];
+    m_qualityGraph->setScores(std::move(displayedScores));
+    if (keepCount == 0) {
+        m_qualityLabel->setText(tr("All %1 frames exceed the overexposure limit.").arg(total));
+        if (m_exportSummary) m_exportSummary->setText(tr("No frames currently qualify for export."));
+        return;
+    }
+    const std::uint32_t cutoffIndex = eligibleFrames[keepCount - 1];
     const std::uint32_t bestIndex = m_qualityResult.rankedFrameIndices.front();
     m_qualityLabel->setText(
-        tr("Keep %1 of %2 frames; discard %3. Cutoff score: %4. Best frame: %5 (%6).")
-            .arg(keepCount).arg(total).arg(total - keepCount)
+        tr("Keep %1 of %2 eligible frames; reject/discard %3. Cutoff score: %4. Best frame: %5 (%6).")
+            .arg(keepCount).arg(eligibleFrames.size()).arg(total - keepCount)
             .arg(scoreByIndex[static_cast<qsizetype>(cutoffIndex)], 0, 'f', 1)
             .arg(bestIndex + 1U)
             .arg(scoreByIndex[static_cast<qsizetype>(bestIndex)], 0, 'f', 1));
@@ -970,12 +1159,28 @@ void MainWindow::startExport()
 
     QVector<std::uint32_t> frameIndices;
     if (!m_qualityResult.isEmpty()) {
-        const int total = static_cast<int>(m_qualityResult.frames.size());
+        QVector<double> clippedByIndex(
+            static_cast<qsizetype>(m_serFile.header().frameCount), 0.0);
+        for (const auto &frame : m_qualityResult.frames)
+            clippedByIndex[static_cast<qsizetype>(frame.frameIndex)] = frame.clippedPercent;
+        QVector<std::uint32_t> eligibleFrames;
+        for (const std::uint32_t frameIndex : m_qualityResult.rankedFrameIndices) {
+            if (!m_rejectClipped->isChecked()
+                || clippedByIndex[static_cast<qsizetype>(frameIndex)]
+                       <= m_maxClippedPercent->value())
+                eligibleFrames.append(frameIndex);
+        }
+        if (eligibleFrames.isEmpty()) {
+            QMessageBox::warning(this, tr("No Frames to Export"),
+                                 tr("All frames exceed the overexposure limit."));
+            return;
+        }
         const int keepCount = std::clamp(static_cast<int>(std::ceil(
-            total * m_qualityKeep->currentData().toInt() / 100.0)), 1, total);
+            eligibleFrames.size() * m_qualityKeep->currentData().toInt() / 100.0)),
+            1, static_cast<int>(eligibleFrames.size()));
         frameIndices.reserve(keepCount);
         for (int rank = 0; rank < keepCount; ++rank)
-            frameIndices.append(m_qualityResult.rankedFrameIndices[rank]);
+            frameIndices.append(eligibleFrames[rank]);
         if (m_qualityOrder->currentData().toInt() == 0)
             std::sort(frameIndices.begin(), frameIndices.end());
     } else {
@@ -991,8 +1196,8 @@ void MainWindow::startExport()
     }
     QSize outputSize(static_cast<int>(m_serFile.header().width),
                      static_cast<int>(m_serFile.header().height));
-    if (referenceDetection.found()) {
-        const int margin = m_cropMargin->currentData().toInt();
+    const int margin = m_cropMargin->currentData().toInt();
+    if (referenceDetection.found() && margin >= 0) {
         outputSize = QSize(
             std::min(static_cast<int>(m_serFile.header().width),
                      referenceDetection.objectRect.width()
@@ -1000,6 +1205,15 @@ void MainWindow::startExport()
             std::min(static_cast<int>(m_serFile.header().height),
                      referenceDetection.objectRect.height()
                          + 2 * qRound(referenceDetection.objectRect.height() * margin / 100.0)));
+    }
+    QSize requestedSize = m_outputSizeMode->currentData().toSize();
+    if (requestedSize == QSize(-1, -1))
+        requestedSize = QSize(m_customOutputWidth->value(), m_customOutputHeight->value());
+    if (requestedSize.isValid()) {
+        outputSize = QSize(std::min(requestedSize.width(),
+                                    static_cast<int>(m_serFile.header().width)),
+                           std::min(requestedSize.height(),
+                                    static_cast<int>(m_serFile.header().height)));
     }
 
     const QFileInfo sourceInfo(m_serFile.path());
@@ -1024,6 +1238,9 @@ void MainWindow::startExport()
     settings.binMonochrome = settings.monochrome && m_exportMonoBinning->isChecked();
     settings.detectionThreshold = m_detectionThreshold->value();
     settings.outputSize = outputSize;
+    settings.rotationQuarterTurns = m_orientation->currentData().toInt();
+    settings.flipHorizontal = m_flipHorizontal->isChecked();
+    settings.flipVertical = m_flipVertical->isChecked();
     const seeingforge::SerFile source = m_serFile;
 
     m_exportButton->setEnabled(false);
@@ -1143,33 +1360,50 @@ void MainWindow::updateImage()
     default: image = m_previews.processed; break;
     }
     if (image.isNull()) return;
+    auto orientedPoint = [this, &image](double sourceX, double sourceY) {
+        double x = sourceX / std::max(m_rawFrame.width(), 1);
+        double y = sourceY / std::max(m_rawFrame.height(), 1);
+        const int turns = m_orientation ? m_orientation->currentData().toInt() & 3 : 0;
+        if (turns == 1) { const double oldX = x; x = 1.0 - y; y = oldX; }
+        else if (turns == 2) { x = 1.0 - x; y = 1.0 - y; }
+        else if (turns == 3) { const double oldX = x; x = y; y = 1.0 - oldX; }
+        if (m_flipHorizontal && m_flipHorizontal->isChecked()) x = 1.0 - x;
+        if (m_flipVertical && m_flipVertical->isChecked()) y = 1.0 - y;
+        return QPointF(x * image.width(), y * image.height());
+    };
+    auto orientedRect = [&orientedPoint](const QRect &rect) {
+        const QPointF points[] = {
+            orientedPoint(rect.left(), rect.top()),
+            orientedPoint(rect.right() + 1.0, rect.top()),
+            orientedPoint(rect.left(), rect.bottom() + 1.0),
+            orientedPoint(rect.right() + 1.0, rect.bottom() + 1.0)};
+        double left = points[0].x(), right = points[0].x();
+        double top = points[0].y(), bottom = points[0].y();
+        for (const QPointF &point : points) {
+            left = std::min(left, point.x()); right = std::max(right, point.x());
+            top = std::min(top, point.y()); bottom = std::max(bottom, point.y());
+        }
+        return QRectF(QPointF(left, top), QPointF(right, bottom));
+    };
     if (m_workflowList->currentRow() == 3 && m_showDetection
         && m_showDetection->isChecked() && m_detection.found()) {
         image = image.copy();
-        const double scaleX = static_cast<double>(image.width()) / m_rawFrame.width();
-        const double scaleY = static_cast<double>(image.height()) / m_rawFrame.height();
-        auto scaledRect = [scaleX, scaleY](const QRect &rect) {
-            return QRectF(rect.x() * scaleX, rect.y() * scaleY,
-                          rect.width() * scaleX, rect.height() * scaleY);
-        };
         QPainter painter(&image);
         painter.setRenderHint(QPainter::Antialiasing, true);
         QPen cropPen(QColor(QStringLiteral("#f0c64f")), 3);
         QPen objectPen(QColor(QStringLiteral("#52d273")), 3);
         painter.setPen(cropPen);
-        painter.drawRect(scaledRect(m_detection.cropRect));
+        painter.drawRect(orientedRect(m_detection.cropRect));
         painter.setPen(objectPen);
-        painter.drawRect(scaledRect(m_detection.objectRect));
+        painter.drawRect(orientedRect(m_detection.objectRect));
     }
     if (m_workflowList->currentRow() == 1 && m_showHotPixels
         && m_showHotPixels->isChecked() && !m_hotPixels.hotPixels.isEmpty()) {
         image = image.copy();
-        const double scaleX = static_cast<double>(image.width()) / m_rawFrame.width();
-        const double scaleY = static_cast<double>(image.height()) / m_rawFrame.height();
         QPainter painter(&image);
         painter.setPen(QPen(QColor(QStringLiteral("#ff4d5a")), 3));
         for (const QPoint point : m_hotPixels.hotPixels) {
-            painter.drawPoint(QPointF(point.x() * scaleX, point.y() * scaleY));
+            painter.drawPoint(orientedPoint(point.x() + 0.5, point.y() + 0.5));
         }
     }
     if (!m_fitToWindow) {

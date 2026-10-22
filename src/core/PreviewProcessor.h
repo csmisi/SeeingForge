@@ -14,6 +14,11 @@ struct PreviewSettings {
     double blueBalance = 1.0;
     double saturation = 1.0;
     int hueShiftDegrees = 0;
+    double gain = 1.0;
+    double gamma = 1.0;
+    int rotationQuarterTurns = 0;
+    bool flipHorizontal = false;
+    bool flipVertical = false;
     int maxPreviewDimension = 1400;
 };
 

@@ -27,6 +27,9 @@ struct SerExportSettings {
     bool binMonochrome = false;
     int detectionThreshold = 12;
     QSize outputSize;
+    int rotationQuarterTurns = 0;
+    bool flipHorizontal = false;
+    bool flipVertical = false;
 };
 
 class SerExporter {

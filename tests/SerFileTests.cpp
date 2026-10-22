@@ -134,10 +134,13 @@ private slots:
     void acceptsIndiRecorderIdentifier();
     void debayersRggbPreview();
     void adjustsPreviewSaturationAndHue();
+    void autoStretchPreservesCompactPlanetHighlights();
+    void whiteBalanceIgnoresColouredBackgroundNoise();
     void measuresSharperFrameHigher();
     void exportsSelectedFramesCentered();
     void exportsRgbAsMonochrome();
     void exportsBayerAsBinnedMonochrome();
+    void rotatesBayerExportAndRemapsPattern();
     void cancelsSlowOperationsCleanly();
     void detectsObjectAndAddsCropMargin();
     void detectsPersistentHotPixel();
@@ -230,6 +233,53 @@ void SerFileTests::adjustsPreviewSaturationAndHue()
                                .processed.pixelColor(1, 1);
     QVERIFY(shifted.green() > shifted.red());
     QVERIFY(shifted.green() > shifted.blue());
+}
+
+void SerFileTests::autoStretchPreservesCompactPlanetHighlights()
+{
+    QImage raw(512, 512, QImage::Format_Grayscale8);
+    raw.fill(4);
+    for (int y = 250; y < 258; ++y) {
+        uchar *line = raw.scanLine(y);
+        for (int x = 240; x < 272; ++x)
+            line[x] = static_cast<uchar>(40 + (x - 240) * 6);
+    }
+
+    seeingforge::PreviewSettings settings;
+    settings.debayer = false;
+    settings.autoStretch = true;
+    const QImage preview = seeingforge::PreviewProcessor::render(raw, 0, settings).processed;
+
+    QVERIFY(qGray(preview.pixel(240, 252)) < 80);
+    QVERIFY(qGray(preview.pixel(255, 252)) > 100);
+    QVERIFY(qGray(preview.pixel(271, 252)) > 220);
+}
+
+void SerFileTests::whiteBalanceIgnoresColouredBackgroundNoise()
+{
+    QImage raw(256, 256, QImage::Format_Grayscale8);
+    for (int y = 0; y < raw.height(); ++y) {
+        uchar *line = raw.scanLine(y);
+        for (int x = 0; x < raw.width(); ++x) {
+            const bool red = (y & 1) == 0 && (x & 1) == 0;
+            const bool blue = (y & 1) != 0 && (x & 1) != 0;
+            line[x] = static_cast<uchar>(red ? 12 : (blue ? 4 : 8));
+        }
+    }
+    for (int y = 120; y < 136; ++y) {
+        uchar *line = raw.scanLine(y);
+        for (int x = 120; x < 136; ++x)
+            line[x] = 180;
+    }
+
+    seeingforge::PreviewSettings settings;
+    settings.autoStretch = false;
+    settings.whiteBalance = true;
+    const QColor background = seeingforge::PreviewProcessor::render(raw, 8, settings)
+                                  .processed.pixelColor(32, 32);
+
+    QVERIFY(background.red() < 30);
+    QVERIFY(background.blue() < 30);
 }
 
 void SerFileTests::measuresSharperFrameHigher()
@@ -348,6 +398,34 @@ void SerFileTests::exportsBayerAsBinnedMonochrome()
     QCOMPARE(output.header().width, 2U);
     QCOMPARE(output.header().height, 2U);
     QCOMPARE(qGray(output.readFrame(0).pixel(0, 0)), 100);
+}
+
+void SerFileTests::rotatesBayerExportAndRemapsPattern()
+{
+    QTemporaryDir directory;
+    const QString inputPath = directory.filePath(QStringLiteral("bayer.ser"));
+    QFile input(inputPath);
+    QVERIFY(input.open(QIODevice::WriteOnly));
+    input.write(bayerSer());
+    input.close();
+
+    seeingforge::SerFile source;
+    QVERIFY2(source.open(inputPath), qPrintable(source.errorString()));
+    seeingforge::SerExportSettings settings;
+    settings.frameIndices = {0};
+    settings.centerObject = false;
+    settings.outputSize = QSize(4, 4);
+    settings.rotationQuarterTurns = 1;
+    const QString outputPath = directory.filePath(QStringLiteral("rotated-bayer.ser"));
+    const auto exportResult = seeingforge::SerExporter::exportFrames(
+        source, outputPath, settings);
+    QVERIFY2(exportResult.success, qPrintable(exportResult.error));
+
+    seeingforge::SerFile output;
+    QVERIFY2(output.open(outputPath), qPrintable(output.errorString()));
+    QCOMPARE(output.header().colorId, 9U); // RGGB rotated clockwise becomes GRBG.
+    QCOMPARE(output.header().width, 4U);
+    QCOMPARE(output.header().height, 4U);
 }
 
 void SerFileTests::cancelsSlowOperationsCleanly()

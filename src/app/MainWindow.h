@@ -24,9 +24,11 @@ class QScrollArea;
 class QPushButton;
 class QProgressBar;
 class QSlider;
+class QSpinBox;
 class QStackedWidget;
 class QTableWidget;
 class QTimer;
+class QualityGraph;
 
 class MainWindow final : public QMainWindow {
     Q_OBJECT
@@ -114,6 +116,11 @@ private:
     QSlider *m_blueBalance = nullptr;
     QSlider *m_saturation = nullptr;
     QSlider *m_hue = nullptr;
+    QSlider *m_gain = nullptr;
+    QSlider *m_gamma = nullptr;
+    QComboBox *m_orientation = nullptr;
+    QCheckBox *m_flipHorizontal = nullptr;
+    QCheckBox *m_flipVertical = nullptr;
     QSlider *m_frameSlider = nullptr;
     QSlider *m_detectionThreshold = nullptr;
     QCheckBox *m_showDetection = nullptr;
@@ -133,11 +140,17 @@ private:
     QPushButton *m_cancelQuality = nullptr;
     QComboBox *m_qualityKeep = nullptr;
     QComboBox *m_qualityOrder = nullptr;
+    QCheckBox *m_rejectClipped = nullptr;
+    QSpinBox *m_maxClippedPercent = nullptr;
     QTableWidget *m_qualityTable = nullptr;
+    QualityGraph *m_qualityGraph = nullptr;
     QProgressBar *m_qualityProgress = nullptr;
     QProgressBar *m_exportProgress = nullptr;
     QPushButton *m_exportButton = nullptr;
     QPushButton *m_cancelExport = nullptr;
+    QComboBox *m_outputSizeMode = nullptr;
+    QSpinBox *m_customOutputWidth = nullptr;
+    QSpinBox *m_customOutputHeight = nullptr;
     QTimer *m_frameDebounce = nullptr;
     QTimer *m_detectionDebounce = nullptr;
     QTimer *m_hotPixelDebounce = nullptr;
