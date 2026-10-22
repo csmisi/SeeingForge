@@ -40,6 +40,17 @@
 #include <cmath>
 #include <utility>
 
+static QSize exportCropSize(QSize source, const QRect &object, int margin, QSize requested)
+{
+    QSize size = source;
+    if (object.isValid() && margin >= 0)
+        size = QSize(object.width() + 2 * qRound(object.width() * margin / 100.0),
+                     object.height() + 2 * qRound(object.height() * margin / 100.0));
+    if (requested.isValid()) size = requested;
+    size = size.boundedTo(source);
+    return QSize(std::max(2, size.width() & ~1), std::max(2, size.height() & ~1));
+}
+
 class QualityGraph final : public QWidget {
 public:
     explicit QualityGraph(QWidget *parent = nullptr) : QWidget(parent)
@@ -633,7 +644,10 @@ QWidget *MainWindow::createStabilizeInspector()
         const bool custom = m_outputSizeMode->currentData().toSize() == QSize(-2, -2);
         m_customOutputWidth->setEnabled(custom);
         m_customOutputHeight->setEnabled(custom);
+        updateDetection();
     });
+    connect(m_customOutputWidth, &QSpinBox::valueChanged, this, [this] { updateDetection(); });
+    connect(m_customOutputHeight, &QSpinBox::valueChanged, this, [this] { updateDetection(); });
     auto *sizeNote = new QLabel(
         tr("Fixed dimensions add surrounding space when available and never upscale the source."), page);
     sizeNote->setWordWrap(true);
@@ -966,6 +980,15 @@ void MainWindow::updateDetection()
     m_detection = seeingforge::ObjectDetector::detect(
         m_rawFrame, m_detectionThreshold->value(), m_cropMargin->currentData().toInt());
     if (m_detection.found()) {
+        QSize requested = m_outputSizeMode->currentData().toSize();
+        if (requested == QSize(-2, -2))
+            requested = QSize(m_customOutputWidth->value(), m_customOutputHeight->value());
+        const QSize size = exportCropSize(m_rawFrame.size(), m_detection.objectRect,
+                                          m_cropMargin->currentData().toInt(), requested);
+        QPoint origin = m_detection.objectRect.center() - QPoint(size.width() / 2, size.height() / 2);
+        if (m_serFile.header().colorId >= 8 && m_serFile.header().colorId <= 19)
+            origin = QPoint(origin.x() & ~1, origin.y() & ~1);
+        m_detection.cropRect = QRect(origin, size);
         m_detectionLabel->setText(
             tr("Object: %1 × %2 px\nRecommended crop: %3 × %4 px")
                 .arg(m_detection.objectRect.width()).arg(m_detection.objectRect.height())
@@ -1223,6 +1246,8 @@ void MainWindow::startExport()
                            std::min(requestedSize.height(),
                                     static_cast<int>(m_serFile.header().height)));
     }
+    outputSize = exportCropSize(m_rawFrame.size(), referenceDetection.objectRect,
+                                margin, requestedSize);
 
     const QFileInfo sourceInfo(m_serFile.path());
     const QString baseFolder = QStringLiteral("seeingforge_%1").arg(
@@ -1404,6 +1429,10 @@ void MainWindow::updateImage()
         painter.drawRect(orientedRect(m_detection.cropRect));
         painter.setPen(objectPen);
         painter.drawRect(orientedRect(m_detection.objectRect));
+        painter.end();
+        // Show the same centered canvas as export, including black padding outside the source.
+        const QRect canvas = orientedRect(m_detection.cropRect).toAlignedRect();
+        image = image.copy(canvas);
     }
     if (m_workflowList->currentRow() == 1 && m_showHotPixels
         && m_showHotPixels->isChecked() && !m_hotPixels.hotPixels.isEmpty()) {
