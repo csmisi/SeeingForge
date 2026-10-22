@@ -17,7 +17,7 @@ jobs:
     name: Linux x64
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Install Qt
         uses: jurplel/install-qt-action@v4.3.1
         with:
@@ -57,7 +57,7 @@ jobs:
         run: |
           ./SeeingForge-${{ github.ref_name }}-linux-x86_64.AppImage --appimage-extract
           test -f squashfs-root/usr/plugins/platforms/libqxcb.so
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: seeingforge-linux-x64
           path: SeeingForge-${{ github.ref_name }}-linux-x86_64.AppImage
@@ -67,7 +67,7 @@ jobs:
     name: Windows x64
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Install Qt
         uses: jurplel/install-qt-action@v4.3.1
         with:
@@ -85,7 +85,7 @@ jobs:
       - name: Package
         shell: pwsh
         run: Compress-Archive -Path stage\* -DestinationPath SeeingForge-${{ github.ref_name }}-windows-x64.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: seeingforge-windows-x64
           path: SeeingForge-${{ github.ref_name }}-windows-x64.zip
@@ -95,7 +95,7 @@ jobs:
     name: macOS Intel
     runs-on: macos-15-intel
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Install Qt
         uses: jurplel/install-qt-action@v4.3.1
         with:
@@ -114,7 +114,7 @@ jobs:
         run: codesign --force --deep --sign - stage/SeeingForge.app
       - name: Package disk image
         run: hdiutil create -volname SeeingForge -srcfolder stage/SeeingForge.app -ov -format UDZO SeeingForge-${{ github.ref_name }}-macos-intel.dmg
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: seeingforge-macos-intel
           path: SeeingForge-${{ github.ref_name }}-macos-intel.dmg
@@ -126,7 +126,7 @@ jobs:
     runs-on: ubuntu-24.04
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8.0.2
         with:
           pattern: seeingforge-*
           path: artifacts
