@@ -18,6 +18,10 @@ SeeingForge was built with substantial assistance from OpenAI's Codex AI coding 
 
 The application uses C++20 and Qt 6 and is designed for Linux, Windows, and macOS. Linux is the primary development platform. Windows packages receive automated build and test coverage and limited hands-on testing. macOS packages receive automated build and test coverage but have not yet been tested on physical Mac hardware.
 
+### Imaging test coverage
+
+Hands-on astronomical testing has so far covered only full-disc lunar and full-disc solar recordings. Close-up lunar or solar surface recordings have not yet been tested, so detection, stabilization, cropping, and quality selection may need further adjustment for those workflows.
+
 ## Features
 
 - Guided Source, Calibration, Color, Stabilize & crop, Quality, and Export workflow.
@@ -55,6 +59,10 @@ The crop selected in **Stabilize & crop** remains visible in **Quality** and **E
 - Centering uses the largest detected object's bounding box, not subpixel registration. A frame with no detection falls back to the source center. Bayer shifts use even-pixel offsets; uncovered edges are black.
 - Full-resolution Bayer monochrome supports RGGB, GRBG, GBRG, and BGGR. Complementary-colour Bayer formats require binning for monochrome export.
 - SER is currently the only export format. Additional formats are intended for future development.
+
+## Future updates
+
+The next planned update is **SeeStar support**, beginning with its RAW AVI recordings and the accompanying TXT metadata file. SeeingForge will expect the matching TXT file beside the AVI and warn the user when it is missing.
 
 ## Build
 
