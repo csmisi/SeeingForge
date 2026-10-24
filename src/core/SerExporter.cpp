@@ -1,5 +1,6 @@
 #include "core/SerExporter.h"
 
+#include "core/FrameSource.h"
 #include "core/SerFile.h"
 #include "core/ObjectDetector.h"
 
@@ -8,6 +9,7 @@
 #include <QtEndian>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace seeingforge {
@@ -29,6 +31,12 @@ void writeSample(char *bytes, quint16 value, int bytesPerSample, bool bigEndian)
     auto *raw = reinterpret_cast<uchar *>(bytes);
     if (bigEndian) qToBigEndian(value, raw);
     else qToLittleEndian(value, raw);
+}
+
+void writeText(QByteArray &header, int offset, const QString &value)
+{
+    const QByteArray text = value.toLatin1().left(39);
+    std::memcpy(header.data() + offset, text.constData(), static_cast<std::size_t>(text.size()));
 }
 
 QByteArray orientFrame(const QByteArray &source, int width, int height, int bytesPerPixel,
@@ -76,10 +84,20 @@ quint32 orientedBayerColorId(quint32 colorId, int quarterTurns,
     return base + static_cast<quint32>(x + 2 * y);
 }
 
+int bayerChannel(int x, int y, quint32 colorId)
+{
+    const int pattern = static_cast<int>(colorId);
+    const int redX = pattern == 9 || pattern == 11 ? 1 : 0;
+    const int redY = pattern == 10 || pattern == 11 ? 1 : 0;
+    if ((x & 1) == redX && (y & 1) == redY) return 0;
+    if ((x & 1) != redX && (y & 1) != redY) return 2;
+    return 1;
+}
+
 } // namespace
 
 ExportResult SerExporter::exportFrames(
-    const SerFile &source, const QString &outputPath,
+    const FrameSource &source, const QString &outputPath,
     const SerExportSettings &settings,
     const std::function<void(int, int)> &progress,
     const std::function<bool()> &shouldCancel)
@@ -101,16 +119,20 @@ ExportResult SerExporter::exportFrames(
         }
     }
 
-    QFile input(source.path());
-    if (!input.open(QIODevice::ReadOnly)) {
-        result.error = input.errorString();
-        return result;
-    }
-    QByteArray header = input.read(static_cast<qint64>(SerFile::HeaderSize));
-    if (header.size() != static_cast<qsizetype>(SerFile::HeaderSize)) {
-        result.error = QStringLiteral("The SER header could not be read.");
-        return result;
-    }
+    QByteArray header(static_cast<qsizetype>(SerFile::HeaderSize), '\0');
+    const QByteArray identifier("LUCAM-RECORDER");
+    std::memcpy(header.data(), identifier.constData(), static_cast<std::size_t>(identifier.size()));
+    qToLittleEndian(source.header().cameraId, reinterpret_cast<uchar *>(header.data() + 14));
+    qToLittleEndian(source.header().colorId, reinterpret_cast<uchar *>(header.data() + 18));
+    qToLittleEndian(source.header().endianFlag, reinterpret_cast<uchar *>(header.data() + 22));
+    qToLittleEndian(source.header().width, reinterpret_cast<uchar *>(header.data() + 26));
+    qToLittleEndian(source.header().height, reinterpret_cast<uchar *>(header.data() + 30));
+    qToLittleEndian(source.header().pixelDepth, reinterpret_cast<uchar *>(header.data() + 34));
+    writeText(header, 42, source.header().observer);
+    writeText(header, 82, source.header().instrument);
+    writeText(header, 122, source.header().telescope);
+    qToLittleEndian(source.header().dateTimeLocal, reinterpret_cast<uchar *>(header.data() + 162));
+    qToLittleEndian(source.header().dateTimeUtc, reinterpret_cast<uchar *>(header.data() + 170));
     int outputWidth = settings.outputSize.isValid()
         ? settings.outputSize.width() : static_cast<int>(source.header().width);
     int outputHeight = settings.outputSize.isValid()
@@ -177,13 +199,7 @@ ExportResult SerExporter::exportFrames(
             output.cancelWriting();
             return result;
         }
-        const std::uint64_t offset = SerFile::HeaderSize + frameBytes * index;
-        if (!input.seek(static_cast<qint64>(offset))) {
-            result.error = QStringLiteral("Could not seek to source frame %1.").arg(index + 1U);
-            output.cancelWriting();
-            return result;
-        }
-        const QByteArray frame = input.read(static_cast<qint64>(frameBytes));
+        QByteArray frame = source.readRawFrame(index);
         if (frame.size() != static_cast<qsizetype>(frameBytes)) {
             result.error = QStringLiteral("Could not copy source frame %1.").arg(index + 1U);
             output.cancelWriting();
@@ -203,6 +219,35 @@ ExportResult SerExporter::exportFrames(
         if (bayerSource) {
             originX -= originX & 1;
             originY -= originY & 1;
+        }
+        const double intensityGain = std::clamp(settings.intensityGain, 1.0, 16.0);
+        const bool applyWhiteBalance = settings.applyCameraWhiteBalance && bayerSource
+            && source.hasCameraWhiteBalance();
+        if (intensityGain > 1.0 || applyWhiteBalance) {
+            const auto whiteBalance = source.cameraWhiteBalance();
+            const std::uint32_t maximumSample = source.header().pixelDepth >= 16
+                ? 65535U : (1U << source.header().pixelDepth) - 1U;
+            const int planes = source.header().planeCount();
+            for (int y = 0; y < sourceHeight; ++y) {
+                for (int x = 0; x < sourceWidth; ++x) {
+                    const double colorGain = applyWhiteBalance
+                        ? whiteBalance[static_cast<std::size_t>(
+                              bayerChannel(x, y, source.header().colorId))]
+                        : 1.0;
+                    for (int plane = 0; plane < planes; ++plane) {
+                        const qsizetype sampleOffset =
+                            ((static_cast<qsizetype>(y) * sourceWidth + x) * planes + plane)
+                            * bytesPerSample;
+                        const quint16 value = readSample(frame.constData() + sampleOffset,
+                                                         bytesPerSample, bigEndian);
+                        const quint16 adjusted = static_cast<quint16>(std::clamp(
+                            static_cast<std::uint32_t>(std::lround(
+                                value * intensityGain * colorGain)), 0U, maximumSample));
+                        writeSample(frame.data() + sampleOffset, adjusted,
+                                    bytesPerSample, bigEndian);
+                    }
+                }
+            }
         }
         QByteArray centered(outputFrameBytes, '\0');
         const int sourceX = std::max(originX, 0);
@@ -335,24 +380,21 @@ ExportResult SerExporter::exportFrames(
                                static_cast<int>(settings.frameIndices.size()));
     }
 
-    const std::uint64_t sourceDataEnd = SerFile::HeaderSize
-        + frameBytes * source.header().frameCount;
-    const std::uint64_t timestampBytes = 8U * source.header().frameCount;
-    const bool hasTimestampTrailer = static_cast<std::uint64_t>(input.size())
-                                     >= sourceDataEnd + timestampBytes;
-    if (hasTimestampTrailer) {
-        for (const std::uint32_t index : settings.frameIndices) {
-            if (!input.seek(static_cast<qint64>(sourceDataEnd + 8U * index))) {
-                result.error = QStringLiteral("Could not seek to a frame timestamp.");
-                output.cancelWriting();
-                return result;
-            }
-            const QByteArray timestamp = input.read(8);
-            if (timestamp.size() != 8 || output.write(timestamp) != 8) {
-                result.error = QStringLiteral("Could not preserve the frame timestamps.");
-                output.cancelWriting();
-                return result;
-            }
+    bool allTimestamps = true;
+    QByteArray timestamps;
+    timestamps.reserve(settings.frameIndices.size() * 8);
+    for (const std::uint32_t index : settings.frameIndices) {
+        const std::uint64_t timestamp = source.frameTimestamp(index);
+        if (timestamp == 0) { allTimestamps = false; break; }
+        const qsizetype oldSize = timestamps.size();
+        timestamps.resize(oldSize + 8);
+        qToLittleEndian(timestamp, reinterpret_cast<uchar *>(timestamps.data() + oldSize));
+    }
+    if (allTimestamps) {
+        if (output.write(timestamps) != timestamps.size()) {
+            result.error = QStringLiteral("Could not preserve the frame timestamps.");
+            output.cancelWriting();
+            return result;
         }
         result.timestampsPreserved = true;
     }

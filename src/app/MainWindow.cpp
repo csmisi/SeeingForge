@@ -7,7 +7,9 @@
 #include <QComboBox>
 #include <QDir>
 #include <QDateTime>
+#include <QDialog>
 #include <QFileDialog>
+#include <QCollator>
 #include <QFileInfo>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -37,6 +39,7 @@
 #include <QtConcurrent>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <utility>
 
@@ -128,6 +131,30 @@ MainWindow::MainWindow(QWidget *parent)
     createMenus();
     createWorkspace();
 
+    m_rawLoadDialog = new QDialog(this);
+    m_rawLoadDialog->setWindowTitle(tr("Loading RAW Sequence"));
+    m_rawLoadDialog->setWindowModality(Qt::ApplicationModal);
+    m_rawLoadDialog->setWindowFlag(Qt::WindowContextHelpButtonHint, false);
+    m_rawLoadDialog->setFixedWidth(360);
+    auto *rawLoadLayout = new QVBoxLayout(m_rawLoadDialog);
+    m_rawLoadLabel = new QLabel(tr("Loading RAW sequence…"), m_rawLoadDialog);
+    m_rawLoadLabel->setWordWrap(true);
+    rawLoadLayout->addWidget(m_rawLoadLabel);
+    m_rawLoadProgress = new QProgressBar(m_rawLoadDialog);
+    m_rawLoadProgress->setTextVisible(true);
+    rawLoadLayout->addWidget(m_rawLoadProgress);
+    m_rawLoadCancelButton = new QPushButton(tr("Cancel"), m_rawLoadDialog);
+    rawLoadLayout->addWidget(m_rawLoadCancelButton, 0, Qt::AlignRight);
+    m_rawLoadDialog->hide();
+    connect(m_rawLoadCancelButton, &QPushButton::clicked, this, [this] {
+        if (m_rawLoadCancel) m_rawLoadCancel->store(true);
+        m_rawLoadLabel->setText(tr("Canceling RAW sequence load…"));
+        m_rawLoadCancelButton->setEnabled(false);
+    });
+    connect(m_rawLoadDialog, &QDialog::rejected, this, [this] {
+        if (m_rawLoadCancel) m_rawLoadCancel->store(true);
+    });
+
     m_previewWatcher = new QFutureWatcher<seeingforge::PreviewImages>(this);
     connect(m_previewWatcher, &QFutureWatcher<seeingforge::PreviewImages>::finished,
             this, &MainWindow::previewRenderFinished);
@@ -152,7 +179,24 @@ MainWindow::MainWindow(QWidget *parent)
             });
     connect(m_exportWatcher, &QFutureWatcher<seeingforge::ExportResult>::progressValueChanged,
             this, [this](int value) { m_exportProgress->setValue(value); });
-    statusBar()->showMessage(tr("Ready — open a SER recording to begin."));
+    m_rawLoadWatcher = new QFutureWatcher<std::shared_ptr<seeingforge::RawSequence>>(this);
+    connect(m_rawLoadWatcher,
+            &QFutureWatcher<std::shared_ptr<seeingforge::RawSequence>>::finished,
+            this, &MainWindow::rawSequenceLoadFinished);
+    connect(m_rawLoadWatcher,
+            &QFutureWatcher<std::shared_ptr<seeingforge::RawSequence>>::progressRangeChanged,
+            this, [this](int minimum, int maximum) {
+                m_rawLoadProgress->setRange(minimum, maximum);
+            });
+    connect(m_rawLoadWatcher,
+            &QFutureWatcher<std::shared_ptr<seeingforge::RawSequence>>::progressValueChanged,
+            this, [this](int value) {
+                m_rawLoadProgress->setValue(value);
+                m_rawLoadLabel->setText(
+                    tr("Validating RAW frame %1 of %2…")
+                        .arg(value).arg(m_rawLoadProgress->maximum()));
+            });
+    statusBar()->showMessage(tr("Ready — open a SER recording or RAW image sequence to begin."));
 }
 
 void MainWindow::createActions()
@@ -161,6 +205,13 @@ void MainWindow::createActions()
     openAction->setShortcut(QKeySequence::Open);
     connect(openAction, &QAction::triggered, this, &MainWindow::openSerFile);
     openAction->setObjectName(QStringLiteral("openSerAction"));
+
+    auto *openRawAction = new QAction(tr("Open &RAW Image Sequence…"), this);
+    connect(openRawAction, &QAction::triggered, this, &MainWindow::openRawFiles);
+    openRawAction->setObjectName(QStringLiteral("openRawAction"));
+    auto *openRawFolderAction = new QAction(tr("Open RAW &Folder…"), this);
+    connect(openRawFolderAction, &QAction::triggered, this, &MainWindow::openRawFolder);
+    openRawFolderAction->setObjectName(QStringLiteral("openRawFolderAction"));
 
     auto *exitAction = new QAction(tr("E&xit"), this);
     exitAction->setShortcut(QKeySequence::Quit);
@@ -186,6 +237,8 @@ void MainWindow::createMenus()
 {
     auto *fileMenu = menuBar()->addMenu(tr("&File"));
     fileMenu->addAction(findChild<QAction *>(QStringLiteral("openSerAction")));
+    fileMenu->addAction(findChild<QAction *>(QStringLiteral("openRawAction")));
+    fileMenu->addAction(findChild<QAction *>(QStringLiteral("openRawFolderAction")));
     fileMenu->addSeparator();
     fileMenu->addAction(findChild<QAction *>(QStringLiteral("exitAction")));
     auto *viewMenu = menuBar()->addMenu(tr("&View"));
@@ -225,7 +278,7 @@ QWidget *MainWindow::createWorkflowPanel()
     heading->setStyleSheet(QStringLiteral("color: #aab2bd; font-size: 11px; letter-spacing: 1px;"));
     layout->addWidget(heading);
     m_workflowList = new QListWidget(panel);
-    m_workflowList->addItems({tr("✓  Source"), tr("2  Calibration"), tr("3  Colour"),
+    m_workflowList->addItems({tr("1  Source"), tr("2  Calibration"), tr("3  Colour"),
                               tr("4  Stabilize & crop"), tr("5  Quality"), tr("6  Export")});
     m_workflowList->setCurrentRow(0);
     connect(m_workflowList, &QListWidget::currentRowChanged,
@@ -254,7 +307,7 @@ QWidget *MainWindow::createPreviewPanel()
     titleFont.setBold(true);
     title->setFont(titleFont);
     barLayout->addWidget(title);
-    m_previewStateLabel = new QLabel(tr("No recording loaded"), bar);
+    m_previewStateLabel = new QLabel(tr("No source loaded"), bar);
     m_previewStateLabel->setStyleSheet(QStringLiteral("color: #aab2bd;"));
     barLayout->addWidget(m_previewStateLabel);
     barLayout->addStretch();
@@ -290,7 +343,7 @@ QWidget *MainWindow::createPreviewPanel()
     m_imageLabel->setAlignment(Qt::AlignCenter);
     m_imageLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
     canvasLayout->addWidget(m_imageLabel, 1, Qt::AlignCenter);
-    m_emptyLabel = new QLabel(tr("Open a SER recording\n\nFile → Open SER File…"), m_previewCanvas);
+    m_emptyLabel = new QLabel(tr("Open a SER recording or RAW image sequence\n\nUse the File menu to begin"), m_previewCanvas);
     m_emptyLabel->setAlignment(Qt::AlignCenter);
     m_emptyLabel->setStyleSheet(QStringLiteral("color: #aab2bd; font-size: 18px;"));
     canvasLayout->addWidget(m_emptyLabel, 1);
@@ -336,10 +389,10 @@ QWidget *MainWindow::createPreviewPanel()
     m_frameSlider = new QSlider(Qt::Horizontal, timeline);
     m_frameSlider->setEnabled(false);
     connect(m_frameSlider, &QSlider::valueChanged, this, [this](int value) {
-        if (m_serFile.isOpen()) {
+        if (m_source && m_source->isOpen()) {
             m_frameLabel->setText(tr("Frame %1 / %2")
                                       .arg(value + 1)
-                                      .arg(m_serFile.header().frameCount));
+                                      .arg(m_source->header().frameCount));
             m_frameDebounce->start();
         }
     });
@@ -403,7 +456,7 @@ QWidget *MainWindow::createColourInspector()
     layout->addWidget(m_debayerMethod);
     layout->addWidget(new QLabel(tr("Bayer pattern"), page));
     m_bayerPattern = new QComboBox(page);
-    m_bayerPattern->addItem(tr("From SER header"), 0);
+    m_bayerPattern->addItem(tr("From source metadata"), 0);
     m_bayerPattern->addItem(tr("RGGB"), 8);
     m_bayerPattern->addItem(tr("GRBG"), 9);
     m_bayerPattern->addItem(tr("GBRG"), 10);
@@ -496,7 +549,7 @@ QWidget *MainWindow::createColourInspector()
     connect(m_autoStretch, &QCheckBox::toggled, this, &MainWindow::requestPreviewRender);
     layout->addWidget(m_autoStretch);
     auto *note = new QLabel(
-        tr("<b>Preview only:</b> These colour adjustments do not modify the SER file "
+        tr("<b>Preview only:</b> These colour adjustments do not modify the source "
            "or its raw pixel data."), page);
     note->setWordWrap(true);
     note->setStyleSheet(QStringLiteral(
@@ -516,6 +569,20 @@ QWidget *MainWindow::createCalibrationInspector()
     auto *layout = new QVBoxLayout(page);
     layout->setContentsMargins(18, 16, 18, 16);
     layout->addWidget(new QLabel(tr("<h2>Calibration</h2><p>Find persistent sensor defects across the recording.</p>"), page));
+
+    layout->addWidget(new QLabel(tr("RAW export colour calibration"), page));
+    m_rawExportWhiteBalance = new QComboBox(page);
+    m_rawExportWhiteBalance->addItem(tr("Preserve linear sensor values"), false);
+    m_rawExportWhiteBalance->addItem(tr("Apply camera white balance"), true);
+    m_rawExportWhiteBalance->setEnabled(false);
+    m_rawExportWhiteBalance->setToolTip(
+        tr("Camera white balance is available after loading a compatible DSLR RAW sequence."));
+    layout->addWidget(m_rawExportWhiteBalance);
+    auto *whiteBalanceNote = new QLabel(
+        tr("Linear preserves the normalized sensor response. Camera white balance produces a more neutral SER by applying the RAW file's recorded channel multipliers without clipping highlights."), page);
+    whiteBalanceNote->setWordWrap(true);
+    whiteBalanceNote->setStyleSheet(QStringLiteral("color: #aab2bd;"));
+    layout->addWidget(whiteBalanceNote);
 
     m_hotPixelSamples = new QComboBox(page);
     m_hotPixelSamples->addItem(tr("8 sampled frames — fast"), 8);
@@ -758,7 +825,7 @@ QWidget *MainWindow::createQualityInspector()
     m_qualityTable->setSelectionMode(QAbstractItemView::SingleSelection);
     connect(m_qualityTable, &QTableWidget::cellDoubleClicked, this,
             [this](int row, int) {
-                if (!m_serFile.isOpen()) return;
+                if (!m_source || !m_source->isOpen()) return;
                 const auto *item = m_qualityTable->item(row, 0);
                 if (!item) return;
                 const int frameIndex = item->data(Qt::UserRole).toInt();
@@ -793,6 +860,22 @@ QWidget *MainWindow::createExportInspector()
     format->setEnabled(false);
     layout->addWidget(format);
 
+    layout->addWidget(new QLabel(tr("Output intensity"), page));
+    m_exportIntensity = new QComboBox(page);
+    m_exportIntensity->addItem(tr("Preserve source intensity (1×)"), 1.0);
+    m_exportIntensity->addItem(tr("Automatic — target peak near 90%"), 0.0);
+    m_exportIntensity->addItem(tr("Increase values 2×"), 2.0);
+    m_exportIntensity->addItem(tr("Increase values 4×"), 4.0);
+    m_exportIntensity->addItem(tr("Increase values 8×"), 8.0);
+    m_exportIntensity->addItem(tr("Increase values 16×"), 16.0);
+    connect(m_exportIntensity, &QComboBox::currentIndexChanged,
+            this, &MainWindow::updateExportIntensityDisplay);
+    layout->addWidget(m_exportIntensity);
+    m_exportIntensityLabel = new QLabel(tr("Load a source to measure its intensity."), page);
+    m_exportIntensityLabel->setWordWrap(true);
+    m_exportIntensityLabel->setStyleSheet(QStringLiteral("color: #aab2bd;"));
+    layout->addWidget(m_exportIntensityLabel);
+
     m_exportMonochrome = new QCheckBox(tr("Export in monochrome"), page);
     m_exportMonochrome->setToolTip(
         tr("Convert to monochrome at full resolution. The source file is never changed."));
@@ -822,7 +905,7 @@ QWidget *MainWindow::createExportInspector()
     auto *processing = new QLabel(
         tr("<b>Applied:</b> quality selection and order, recommended crop size, "
            "and per-frame object centering.<br><br>"
-           "Raw sample values and SER metadata are preserved. Colour adjustments and overlays remain preview-only."), page);
+           "SER metadata is preserved. Raw values remain unchanged at 1× unless camera white balance or an intensity increase is selected. Preview colour controls and overlays remain preview-only."), page);
     processing->setWordWrap(true);
     processing->setStyleSheet(QStringLiteral(
         "color: #aab2bd; background: rgba(255,255,255,0.035); "
@@ -861,7 +944,7 @@ void MainWindow::openSerFile()
         QStringLiteral("files/lastOpenFolder")).toString();
     const QString initialFolder = QDir(savedFolder).exists()
         ? savedFolder
-        : (m_serFile.isOpen() ? QFileInfo(m_serFile.path()).absolutePath()
+        : (m_source && m_source->isOpen() ? m_source->sourceDirectory()
                               : QDir::homePath());
 
     QFileDialog dialog(this, tr("Open SER Recording"));
@@ -876,21 +959,124 @@ void MainWindow::openSerFile()
         loadSerFile(dialog.selectedFiles().constFirst());
 }
 
+void MainWindow::openRawFiles()
+{
+    QSettings settings;
+    QFileDialog dialog(this, tr("Open RAW Image Sequence"));
+    dialog.setOption(QFileDialog::DontUseNativeDialog, true);
+    dialog.setFileMode(QFileDialog::ExistingFiles);
+    dialog.setAcceptMode(QFileDialog::AcceptOpen);
+    dialog.setNameFilters({tr("Camera RAW files (*.cr2 *.CR2 *.cr3 *.CR3 *.nef *.NEF *.arw *.ARW *.dng *.DNG *.raf *.RAF *.orf *.ORF *.rw2 *.RW2)"),
+                           tr("All files (*)")});
+    dialog.setViewMode(QFileDialog::Detail);
+    dialog.setDirectory(settings.value(QStringLiteral("files/lastOpenFolder"), QDir::homePath()).toString());
+    dialog.resize(1050, 650);
+    if (dialog.exec() == QDialog::Accepted) loadRawFiles(dialog.selectedFiles());
+}
+
+void MainWindow::openRawFolder()
+{
+    QSettings settings;
+    const QString folder = QFileDialog::getExistingDirectory(
+        this, tr("Open RAW Folder"),
+        settings.value(QStringLiteral("files/lastOpenFolder"), QDir::homePath()).toString(),
+        QFileDialog::ShowDirsOnly | QFileDialog::DontUseNativeDialog);
+    if (folder.isEmpty()) return;
+    QDir directory(folder);
+    QStringList files = directory.entryList(
+        {QStringLiteral("*.cr2"), QStringLiteral("*.CR2"), QStringLiteral("*.cr3"), QStringLiteral("*.CR3"),
+         QStringLiteral("*.nef"), QStringLiteral("*.NEF"), QStringLiteral("*.arw"), QStringLiteral("*.ARW"),
+         QStringLiteral("*.dng"), QStringLiteral("*.DNG"), QStringLiteral("*.raf"), QStringLiteral("*.RAF"),
+         QStringLiteral("*.orf"), QStringLiteral("*.ORF"), QStringLiteral("*.rw2"), QStringLiteral("*.RW2")},
+        QDir::Files, QDir::Name);
+    for (QString &file : files) file = directory.absoluteFilePath(file);
+    loadRawFiles(files);
+}
+
 void MainWindow::loadSerFile(const QString &path)
 {
-    if (!m_serFile.open(path)) {
-        QMessageBox::critical(this, tr("Cannot Open SER File"), m_serFile.errorString());
+    auto source = std::make_shared<seeingforge::SerFile>();
+    if (!source->open(path)) {
+        QMessageBox::critical(this, tr("Cannot Open SER File"), source->errorString());
         return;
     }
+    m_source = std::move(source);
     QSettings settings;
     settings.setValue(QStringLiteral("files/lastOpenFolder"),
                       QFileInfo(path).absolutePath());
+    finishLoadingSource();
+}
+
+void MainWindow::loadRawFiles(const QStringList &selectedPaths)
+{
+    if (selectedPaths.isEmpty()) return;
+    if (m_rawLoadWatcher->isRunning()) {
+        QMessageBox::information(this, tr("RAW Sequence Loading"),
+                                 tr("Another RAW sequence is already being loaded."));
+        return;
+    }
+    QStringList paths = selectedPaths;
+    QCollator collator;
+    collator.setNumericMode(true);
+    std::sort(paths.begin(), paths.end(), [&collator](const QString &left, const QString &right) {
+        return collator.compare(QFileInfo(left).fileName(), QFileInfo(right).fileName()) < 0;
+    });
+    m_rawLoadProgress->setRange(0, paths.size());
+    m_rawLoadProgress->setValue(0);
+    m_rawLoadLabel->setText(tr("Validating %1 RAW frames…").arg(paths.size()));
+    m_rawLoadCancelButton->setEnabled(true);
+    m_rawLoadDialog->show();
+    statusBar()->showMessage(tr("Loading RAW sequence…"));
+
+    m_rawLoadCancel = std::make_shared<std::atomic_bool>(false);
+    const auto cancelFlag = m_rawLoadCancel;
+    m_rawLoadWatcher->setFuture(QtConcurrent::run(
+        [paths, cancelFlag](QPromise<std::shared_ptr<seeingforge::RawSequence>> &promise) {
+        promise.setProgressRange(0, static_cast<int>(paths.size()));
+        auto source = std::make_shared<seeingforge::RawSequence>();
+        const bool loaded = source->open(paths,
+            [&promise](int completed, int) {
+                promise.setProgressValue(completed);
+            },
+            [cancelFlag] { return cancelFlag->load(); });
+        Q_UNUSED(loaded);
+        promise.addResult(std::move(source));
+    }));
+}
+
+void MainWindow::rawSequenceLoadFinished()
+{
+    const auto source = m_rawLoadWatcher->result();
+    const bool canceled = m_rawLoadCancel && m_rawLoadCancel->load();
+    m_rawLoadDialog->hide();
+    m_rawLoadCancel.reset();
+    if (canceled) {
+        statusBar()->showMessage(tr("RAW sequence loading canceled."), 5000);
+        return;
+    }
+    if (!source || !source->isOpen()) {
+        QMessageBox::critical(this, tr("Cannot Open RAW Sequence"),
+                              source ? source->errorString() : tr("The RAW sequence could not be loaded."));
+        statusBar()->showMessage(tr("RAW sequence loading failed."), 5000);
+        return;
+    }
+    m_source = source;
+    QSettings settings;
+    settings.setValue(QStringLiteral("files/lastOpenFolder"), m_source->sourceDirectory());
+    finishLoadingSource();
+}
+
+void MainWindow::finishLoadingSource()
+{
     m_currentFrame = 0;
-    m_frameSlider->setRange(0, static_cast<int>(m_serFile.header().frameCount - 1));
+    m_frameSlider->setRange(0, static_cast<int>(m_source->header().frameCount - 1));
     m_frameSlider->setValue(0);
     m_frameSlider->setEnabled(true);
-    m_debayerMethod->setEnabled(seeingforge::PreviewProcessor::supportsDebayer(m_serFile.header().colorId));
-    m_bayerPattern->setItemText(0, tr("From SER header — %1").arg(m_serFile.header().colorName()));
+    m_debayerMethod->setEnabled(seeingforge::PreviewProcessor::supportsDebayer(m_source->header().colorId));
+    m_bayerPattern->setItemText(0, tr("From source — %1").arg(m_source->header().colorName()));
+    const bool hasCameraWhiteBalance = m_source->hasCameraWhiteBalance();
+    m_rawExportWhiteBalance->setEnabled(hasCameraWhiteBalance);
+    if (!hasCameraWhiteBalance) m_rawExportWhiteBalance->setCurrentIndex(0);
     m_hotPixels = {};
     m_hotPixelLabel->setText(tr("Analysis has not been run."));
     m_qualityResult = {};
@@ -900,21 +1086,21 @@ void MainWindow::loadSerFile(const QString &path)
     m_workflowList->setCurrentRow(0);
     loadFrame(0);
     updateMetadata();
-    const QFileInfo info(path);
-    setWindowTitle(QStringLiteral("%1 — SeeingForge").arg(info.fileName()));
-    statusBar()->showMessage(tr("Loaded %1").arg(info.fileName()));
+    setWindowTitle(QStringLiteral("%1 — SeeingForge").arg(m_source->displayName()));
+    statusBar()->showMessage(tr("Loaded %1").arg(m_source->displayName()));
 }
 
 void MainWindow::loadFrame(std::uint32_t index)
 {
-    m_rawFrame = m_serFile.readFrame(index);
+    m_rawFrame = m_source->readFrame(index);
     if (m_rawFrame.isNull()) {
         QMessageBox::critical(this, tr("Cannot Read Frame"), tr("Frame %1 could not be decoded.").arg(index + 1));
         return;
     }
     m_currentFrame = index;
     m_emptyLabel->hide();
-    m_frameLabel->setText(tr("Frame %1 / %2").arg(index + 1).arg(m_serFile.header().frameCount));
+    m_frameLabel->setText(tr("Frame %1 / %2").arg(index + 1).arg(m_source->header().frameCount));
+    updateExportIntensityDisplay();
     requestPreviewRender();
     if (m_detectionDebounce) m_detectionDebounce->start();
 }
@@ -941,7 +1127,7 @@ std::uint32_t MainWindow::effectiveColorId() const
 {
     if (m_bayerPattern && m_bayerPattern->currentData().toUInt() != 0)
         return m_bayerPattern->currentData().toUInt();
-    return m_serFile.header().colorId;
+    return m_source->header().colorId;
 }
 
 void MainWindow::requestPreviewRender()
@@ -986,7 +1172,7 @@ void MainWindow::updateDetection()
         const QSize size = exportCropSize(m_rawFrame.size(), m_detection.objectRect,
                                           m_cropMargin->currentData().toInt(), requested);
         QPoint origin = m_detection.objectRect.center() - QPoint(size.width() / 2, size.height() / 2);
-        if (m_serFile.header().colorId >= 8 && m_serFile.header().colorId <= 19)
+        if (m_source->header().colorId >= 8 && m_source->header().colorId <= 19)
             origin = QPoint(origin.x() & ~1, origin.y() & ~1);
         m_detection.cropRect = QRect(origin, size);
         m_detectionLabel->setText(
@@ -997,11 +1183,12 @@ void MainWindow::updateDetection()
         m_detectionLabel->setText(tr("No object detected. Lower the threshold until the target is outlined."));
     }
     updateImage();
+    updateExportIntensityDisplay();
 }
 
 void MainWindow::startHotPixelAnalysis()
 {
-    if (!m_serFile.isOpen()) return;
+    if (!m_source || !m_source->isOpen()) return;
     if (m_hotPixelWatcher->isRunning()) {
         m_hotPixelDirty = true;
         return;
@@ -1012,17 +1199,17 @@ void MainWindow::startHotPixelAnalysis()
     settings.minimumBrightness = m_hotPixelBrightness->value();
     settings.localContrast = m_hotPixelContrast->value();
     settings.persistencePercent = m_hotPixelPersistence->value();
-    const seeingforge::SerFile file = m_serFile;
+    const auto source = m_source;
     m_analyzeHotPixels->setEnabled(false);
     m_hotPixelLabel->setText(tr("Analyzing sampled frames…"));
-    m_hotPixelWatcher->setFuture(QtConcurrent::run([file, settings] {
-        return seeingforge::HotPixelDetector::detect(file, settings);
+    m_hotPixelWatcher->setFuture(QtConcurrent::run([source, settings] {
+        return seeingforge::HotPixelDetector::detect(*source, settings);
     }));
 }
 
 void MainWindow::requestHotPixelAnalysis()
 {
-    if (!m_serFile.isOpen() || !m_hotPixelDebounce) return;
+    if (!m_source || !m_source->isOpen() || !m_hotPixelDebounce) return;
     m_hotPixelDirty = true;
     m_hotPixelLabel->setText(tr("Settings changed — updated analysis scheduled…"));
     m_hotPixelDebounce->start();
@@ -1043,28 +1230,28 @@ void MainWindow::hotPixelAnalysisFinished()
 
 void MainWindow::startQualityAnalysis()
 {
-    if (!m_serFile.isOpen() || m_qualityWatcher->isRunning()) return;
-    const seeingforge::SerFile file = m_serFile;
+    if (!m_source || !m_source->isOpen() || m_qualityWatcher->isRunning()) return;
+    const auto source = m_source;
     const int backgroundThreshold = m_detectionThreshold
         ? m_detectionThreshold->value() : 12;
     m_analyzeQuality->setEnabled(false);
     m_cancelQuality->setEnabled(true);
-    m_qualityProgress->setRange(0, static_cast<int>(m_serFile.header().frameCount));
+    m_qualityProgress->setRange(0, static_cast<int>(m_source->header().frameCount));
     m_qualityProgress->setValue(0);
     m_qualityProgress->show();
     m_qualityKeep->setEnabled(false);
     m_qualityOrder->setEnabled(false);
     m_qualityLabel->setText(
         tr("Analyzing %1 frames… Large recordings can take a while because every frame is read.")
-            .arg(m_serFile.header().frameCount));
+            .arg(m_source->header().frameCount));
     statusBar()->showMessage(tr("Analyzing frame quality…"));
     m_qualityCancel = std::make_shared<std::atomic_bool>(false);
     const auto cancelFlag = m_qualityCancel;
     m_qualityWatcher->setFuture(QtConcurrent::run(
-        [file, backgroundThreshold, cancelFlag](QPromise<seeingforge::QualityResult> &promise) {
-            promise.setProgressRange(0, static_cast<int>(file.header().frameCount));
+        [source, backgroundThreshold, cancelFlag](QPromise<seeingforge::QualityResult> &promise) {
+            promise.setProgressRange(0, static_cast<int>(source->header().frameCount));
             auto result = seeingforge::QualityAnalyzer::analyze(
-                file, backgroundThreshold,
+                *source, backgroundThreshold,
                 [&promise](int completed, int) { promise.setProgressValue(completed); },
                 [cancelFlag] { return cancelFlag->load(); });
             promise.addResult(std::move(result));
@@ -1102,7 +1289,7 @@ void MainWindow::updateQualityDisplay()
     if (m_qualityResult.isEmpty() || !m_qualityTable) return;
     const int total = static_cast<int>(m_qualityResult.frames.size());
     QVector<double> clippedByIndex(
-        static_cast<qsizetype>(m_serFile.header().frameCount), 0.0);
+        static_cast<qsizetype>(m_source->header().frameCount), 0.0);
     for (const auto &frame : m_qualityResult.frames)
         clippedByIndex[static_cast<qsizetype>(frame.frameIndex)] = frame.clippedPercent;
     QVector<std::uint32_t> eligibleFrames;
@@ -1122,7 +1309,7 @@ void MainWindow::updateQualityDisplay()
         accepted.insert(eligibleFrames[rank]);
 
     QVector<double> scoreByIndex(
-        static_cast<qsizetype>(m_serFile.header().frameCount), 0.0);
+        static_cast<qsizetype>(m_source->header().frameCount), 0.0);
     for (const auto &frame : m_qualityResult.frames)
         scoreByIndex[static_cast<qsizetype>(frame.frameIndex)] = frame.score;
 
@@ -1186,12 +1373,12 @@ void MainWindow::updateQualityDisplay()
 
 void MainWindow::startExport()
 {
-    if (!m_serFile.isOpen() || m_exportWatcher->isRunning()) return;
+    if (!m_source || !m_source->isOpen() || m_exportWatcher->isRunning()) return;
 
     QVector<std::uint32_t> frameIndices;
     if (!m_qualityResult.isEmpty()) {
         QVector<double> clippedByIndex(
-            static_cast<qsizetype>(m_serFile.header().frameCount), 0.0);
+            static_cast<qsizetype>(m_source->header().frameCount), 0.0);
         for (const auto &frame : m_qualityResult.frames)
             clippedByIndex[static_cast<qsizetype>(frame.frameIndex)] = frame.clippedPercent;
         QVector<std::uint32_t> eligibleFrames;
@@ -1215,8 +1402,8 @@ void MainWindow::startExport()
         if (m_qualityOrder->currentData().toInt() == 0)
             std::sort(frameIndices.begin(), frameIndices.end());
     } else {
-        frameIndices.reserve(static_cast<qsizetype>(m_serFile.header().frameCount));
-        for (std::uint32_t index = 0; index < m_serFile.header().frameCount; ++index)
+        frameIndices.reserve(static_cast<qsizetype>(m_source->header().frameCount));
+        for (std::uint32_t index = 0; index < m_source->header().frameCount; ++index)
             frameIndices.append(index);
     }
 
@@ -1225,15 +1412,15 @@ void MainWindow::startExport()
         referenceDetection = seeingforge::ObjectDetector::detect(
             m_rawFrame, m_detectionThreshold->value(), m_cropMargin->currentData().toInt());
     }
-    QSize outputSize(static_cast<int>(m_serFile.header().width),
-                     static_cast<int>(m_serFile.header().height));
+    QSize outputSize(static_cast<int>(m_source->header().width),
+                     static_cast<int>(m_source->header().height));
     const int margin = m_cropMargin->currentData().toInt();
     if (referenceDetection.found() && margin >= 0) {
         outputSize = QSize(
-            std::min(static_cast<int>(m_serFile.header().width),
+            std::min(static_cast<int>(m_source->header().width),
                      referenceDetection.objectRect.width()
                          + 2 * qRound(referenceDetection.objectRect.width() * margin / 100.0)),
-            std::min(static_cast<int>(m_serFile.header().height),
+            std::min(static_cast<int>(m_source->header().height),
                      referenceDetection.objectRect.height()
                          + 2 * qRound(referenceDetection.objectRect.height() * margin / 100.0)));
     }
@@ -1242,14 +1429,14 @@ void MainWindow::startExport()
         requestedSize = QSize(m_customOutputWidth->value(), m_customOutputHeight->value());
     if (requestedSize.isValid()) {
         outputSize = QSize(std::min(requestedSize.width(),
-                                    static_cast<int>(m_serFile.header().width)),
+                                    static_cast<int>(m_source->header().width)),
                            std::min(requestedSize.height(),
-                                    static_cast<int>(m_serFile.header().height)));
+                                    static_cast<int>(m_source->header().height)));
     }
     outputSize = exportCropSize(m_rawFrame.size(), referenceDetection.objectRect,
                                 margin, requestedSize);
 
-    const QFileInfo sourceInfo(m_serFile.path());
+    const QFileInfo sourceInfo(m_source->path());
     const QString baseFolder = QStringLiteral("seeingforge_%1").arg(
         QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd_HHmm")));
     QDir parent(sourceInfo.absolutePath());
@@ -1259,22 +1446,26 @@ void MainWindow::startExport()
         folderName = QStringLiteral("%1_%2").arg(baseFolder).arg(suffix++);
     if (!parent.mkpath(folderName)) {
         QMessageBox::critical(this, tr("Cannot Export"),
-                              tr("Could not create the export folder beside the source recording."));
+                              tr("Could not create the export folder beside the source."));
         return;
     }
-    const QString outputPath = parent.filePath(folderName + QLatin1Char('/')
-                                                + sourceInfo.fileName());
+    const bool serInput = dynamic_cast<seeingforge::SerFile *>(m_source.get()) != nullptr;
+    const QString outputName = serInput ? sourceInfo.fileName() : QStringLiteral("raw_sequence.ser");
+    const QString outputPath = parent.filePath(folderName + QLatin1Char('/') + outputName);
     seeingforge::SerExportSettings settings;
     settings.frameIndices = frameIndices;
     settings.centerObject = true;
     settings.monochrome = m_exportMonochrome->isChecked();
     settings.binMonochrome = settings.monochrome && m_exportMonoBinning->isChecked();
+    settings.applyCameraWhiteBalance = m_rawExportWhiteBalance->isEnabled()
+        && m_rawExportWhiteBalance->currentData().toBool();
+    settings.intensityGain = selectedExportIntensityGain();
     settings.detectionThreshold = m_detectionThreshold->value();
     settings.outputSize = outputSize;
     settings.rotationQuarterTurns = m_orientation->currentData().toInt();
     settings.flipHorizontal = m_flipHorizontal->isChecked();
     settings.flipVertical = m_flipVertical->isChecked();
-    const seeingforge::SerFile source = m_serFile;
+    const auto source = m_source;
 
     m_exportButton->setEnabled(false);
     m_cancelExport->setEnabled(true);
@@ -1289,7 +1480,7 @@ void MainWindow::startExport()
         [source, outputPath, settings, cancelFlag](QPromise<seeingforge::ExportResult> &promise) {
             promise.setProgressRange(0, settings.frameIndices.size());
             auto result = seeingforge::SerExporter::exportFrames(
-                source, outputPath, settings,
+                *source, outputPath, settings,
                 [&promise](int completed, int) { promise.setProgressValue(completed); },
                 [cancelFlag] { return cancelFlag->load(); });
             promise.addResult(std::move(result));
@@ -1346,7 +1537,62 @@ void MainWindow::selectWorkflowStep(int row)
         m_inspectorStack->setCurrentIndex(row);
         if (row == 3) updateDetection();
         else updateImage();
+        if (row == 5) updateExportIntensityDisplay();
     }
+}
+
+double MainWindow::selectedExportIntensityGain() const
+{
+    if (!m_exportIntensity) return 1.0;
+    const double selected = m_exportIntensity->currentData().toDouble();
+    if (selected > 0.0 || m_rawFrame.isNull()) return std::max(selected, 1.0);
+
+    std::array<std::uint64_t, 256> histogram{};
+    QRect region = m_detection.found() ? m_detection.objectRect : m_rawFrame.rect();
+    region = region.intersected(m_rawFrame.rect());
+    std::uint64_t count = 0;
+    for (int y = region.top(); y <= region.bottom(); ++y) {
+        for (int x = region.left(); x <= region.right(); ++x) {
+            const int value = m_rawFrame.format() == QImage::Format_Grayscale8
+                ? m_rawFrame.constScanLine(y)[x] : qGray(m_rawFrame.pixel(x, y));
+            ++histogram[static_cast<std::size_t>(value)];
+            ++count;
+        }
+    }
+    if (count == 0) return 1.0;
+    const std::uint64_t target = count - std::max<std::uint64_t>(1, count / 1000U);
+    std::uint64_t cumulative = 0;
+    int high = 1;
+    for (int value = 0; value < 256; ++value) {
+        cumulative += histogram[static_cast<std::size_t>(value)];
+        if (cumulative >= target) { high = std::max(value, 1); break; }
+    }
+    return std::clamp(230.0 / high, 1.0, 16.0);
+}
+
+void MainWindow::updateExportIntensityDisplay()
+{
+    if (!m_exportIntensityLabel || m_rawFrame.isNull()) return;
+    QRect region = m_detection.found() ? m_detection.objectRect : m_rawFrame.rect();
+    region = region.intersected(m_rawFrame.rect());
+    int maximum = 0;
+    for (int y = region.top(); y <= region.bottom(); ++y) {
+        for (int x = region.left(); x <= region.right(); ++x) {
+            const int value = m_rawFrame.format() == QImage::Format_Grayscale8
+                ? m_rawFrame.constScanLine(y)[x] : qGray(m_rawFrame.pixel(x, y));
+            maximum = std::max(maximum, value);
+        }
+    }
+    const double gain = selectedExportIntensityGain();
+    const double measuredPercent = maximum * 100.0 / 255.0;
+    const double predictedPercent = std::min(100.0, measuredPercent * gain);
+    const bool clips = measuredPercent * gain > 100.0;
+    m_exportIntensityLabel->setText(
+        tr("Current target peak: %1%. Export gain: %2×. Estimated output peak: %3%%4")
+            .arg(measuredPercent, 0, 'f', 1)
+            .arg(gain, 0, 'f', 2)
+            .arg(predictedPercent, 0, 'f', 1)
+            .arg(clips ? tr(" — brightest pixels will clip") : QString()));
 }
 
 void MainWindow::fitImage()
@@ -1418,23 +1664,28 @@ void MainWindow::updateImage()
         }
         return QRectF(QPointF(left, top), QPointF(right, bottom));
     };
-    if (m_workflowList->currentRow() == 3 && m_showDetection
-        && m_showDetection->isChecked() && m_detection.found()) {
-        image = image.copy();
-        QPainter painter(&image);
-        painter.setRenderHint(QPainter::Antialiasing, true);
-        QPen cropPen(QColor(QStringLiteral("#f0c64f")), 3);
-        QPen objectPen(QColor(QStringLiteral("#52d273")), 3);
-        painter.setPen(cropPen);
-        painter.drawRect(orientedRect(m_detection.cropRect));
-        painter.setPen(objectPen);
-        painter.drawRect(orientedRect(m_detection.objectRect));
-        painter.end();
+    const int workflowStep = m_workflowList->currentRow();
+    const bool stabilizationOverlay = workflowStep == 3 && m_showDetection
+        && m_showDetection->isChecked();
+    const bool persistentCropPreview = workflowStep >= 4;
+    if (m_detection.found() && (stabilizationOverlay || persistentCropPreview)) {
+        if (stabilizationOverlay) {
+            image = image.copy();
+            QPainter painter(&image);
+            painter.setRenderHint(QPainter::Antialiasing, true);
+            QPen cropPen(QColor(QStringLiteral("#f0c64f")), 3);
+            QPen objectPen(QColor(QStringLiteral("#52d273")), 3);
+            painter.setPen(cropPen);
+            painter.drawRect(orientedRect(m_detection.cropRect));
+            painter.setPen(objectPen);
+            painter.drawRect(orientedRect(m_detection.objectRect));
+            painter.end();
+        }
         // Show the same centered canvas as export, including black padding outside the source.
         const QRect canvas = orientedRect(m_detection.cropRect).toAlignedRect();
         image = image.copy(canvas);
     }
-    if (m_workflowList->currentRow() == 1 && m_showHotPixels
+    if (workflowStep == 1 && m_showHotPixels
         && m_showHotPixels->isChecked() && !m_hotPixels.hotPixels.isEmpty()) {
         image = image.copy();
         QPainter painter(&image);
@@ -1482,13 +1733,13 @@ void MainWindow::centerPreview()
 void MainWindow::updateMetadata()
 {
     if (!m_metadataTable) return;
-    if (!m_serFile.isOpen()) {
+    if (!m_source || !m_source->isOpen()) {
         for (int row = 0; row < m_metadataTable->rowCount(); ++row)
-            setMetadataRow(row, row == 0 ? tr("Status") : QString(), row == 0 ? tr("No recording loaded") : QString());
+            setMetadataRow(row, row == 0 ? tr("Status") : QString(), row == 0 ? tr("No source loaded") : QString());
         return;
     }
-    const auto &header = m_serFile.header();
-    setMetadataRow(0, tr("File"), QFileInfo(m_serFile.path()).fileName());
+    const auto &header = m_source->header();
+    setMetadataRow(0, tr("Source"), m_source->displayName());
     setMetadataRow(1, tr("Dimensions"), tr("%1 × %2 px").arg(header.width).arg(header.height));
     setMetadataRow(2, tr("Frames"), QString::number(header.frameCount));
     setMetadataRow(3, tr("Pixel depth"), tr("%1-bit").arg(header.pixelDepth));
@@ -1509,8 +1760,8 @@ void MainWindow::setMetadataRow(int row, const QString &name, const QString &val
 void MainWindow::showAbout()
 {
     QMessageBox::about(this, tr("About SeeingForge"),
-        tr("<h2>SeeingForge 0.1</h2><p>Open-source planetary imaging preparation.</p>"
-           "<p>This build provides guided SER preview and colour development.</p>"));
+        tr("<h2>SeeingForge 0.2.0</h2><p>Open-source planetary imaging preparation.</p>"
+           "<p>This build provides guided SER and DSLR RAW sequence processing.</p>"));
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event)

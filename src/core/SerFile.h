@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/FrameSource.h"
+
 #include <QImage>
 #include <QByteArray>
 #include <QString>
@@ -28,21 +30,24 @@ struct SerHeader {
     [[nodiscard]] std::uint64_t bytesPerFrame() const;
 };
 
-class SerFile {
+class SerFile : public FrameSource {
 public:
     static constexpr std::uint64_t HeaderSize = 178;
 
     [[nodiscard]] bool open(const QString &path);
     void close();
 
-    [[nodiscard]] bool isOpen() const;
-    [[nodiscard]] const QString &path() const;
-    [[nodiscard]] const SerHeader &header() const;
+    [[nodiscard]] bool isOpen() const override;
+    [[nodiscard]] QString path() const override;
+    [[nodiscard]] QString displayName() const override;
+    [[nodiscard]] QString sourceDirectory() const override;
+    [[nodiscard]] const SerHeader &header() const override;
     [[nodiscard]] const QString &errorString() const;
 
-    [[nodiscard]] QImage readFrame(std::uint32_t index) const;
-    [[nodiscard]] QByteArray readRawFrame(std::uint32_t index) const;
-    [[nodiscard]] QImage decodeFrame(const QByteArray &rawFrame) const;
+    [[nodiscard]] QImage readFrame(std::uint32_t index) const override;
+    [[nodiscard]] QByteArray readRawFrame(std::uint32_t index) const override;
+    [[nodiscard]] QImage decodeFrame(const QByteArray &rawFrame) const override;
+    [[nodiscard]] std::uint64_t frameTimestamp(std::uint32_t index) const override;
 
 private:
     QString m_path;

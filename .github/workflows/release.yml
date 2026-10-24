@@ -18,6 +18,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
+      - name: Install LibRaw
+        run: sudo apt-get update && sudo apt-get install -y libraw-dev
       - name: Install Qt
         uses: jurplel/install-qt-action@v4.3.1
         with:
@@ -68,6 +70,8 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v7.0.1
+      - name: Install LibRaw
+        run: vcpkg install libraw:x64-windows
       - name: Install Qt
         uses: jurplel/install-qt-action@v4.3.1
         with:
@@ -75,7 +79,7 @@ jobs:
           arch: win64_msvc2022_64
           cache: true
       - name: Configure
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
       - name: Build
         run: cmake --build build --config Release
       - name: Test
@@ -96,6 +100,8 @@ jobs:
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v7.0.1
+      - name: Install LibRaw
+        run: brew install libraw
       - name: Install Qt
         uses: jurplel/install-qt-action@v4.3.1
         with:

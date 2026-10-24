@@ -1,5 +1,6 @@
 #include "core/QualityAnalyzer.h"
 
+#include "core/FrameSource.h"
 #include "core/SerFile.h"
 #include "core/ObjectDetector.h"
 
@@ -92,7 +93,7 @@ FrameQuality QualityAnalyzer::measureFrame(const QImage &frame,
 }
 
 QualityResult QualityAnalyzer::analyze(
-    const SerFile &file, int backgroundThreshold,
+    const FrameSource &file, int backgroundThreshold,
     const std::function<void(int, int)> &progress,
     const std::function<bool()> &shouldCancel)
 {

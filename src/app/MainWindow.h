@@ -1,7 +1,9 @@
 #pragma once
 
 #include "core/PreviewProcessor.h"
+#include "core/FrameSource.h"
 #include "core/SerFile.h"
+#include "core/RawSequence.h"
 #include "core/ObjectDetector.h"
 #include "core/HotPixelDetector.h"
 #include "core/QualityAnalyzer.h"
@@ -23,6 +25,7 @@ class QResizeEvent;
 class QScrollArea;
 class QPushButton;
 class QProgressBar;
+class QDialog;
 class QSlider;
 class QSpinBox;
 class QStackedWidget;
@@ -41,6 +44,8 @@ protected:
 
 private slots:
     void openSerFile();
+    void openRawFiles();
+    void openRawFolder();
     void fitImage();
     void showActualSize();
     void zoomIn();
@@ -78,6 +83,9 @@ private:
     QWidget *createExportInspector();
     QWidget *createPlaceholderInspector(const QString &title, const QString &description);
     void loadSerFile(const QString &path);
+    void loadRawFiles(const QStringList &paths);
+    void rawSequenceLoadFinished();
+    void finishLoadingSource();
     void loadFrame(std::uint32_t index);
     void startPreviewRender();
     seeingforge::PreviewSettings previewSettings() const;
@@ -85,15 +93,22 @@ private:
     void updateImage();
     void centerPreview();
     void updateMetadata();
+    void updateExportIntensityDisplay();
+    double selectedExportIntensityGain() const;
     void setMetadataRow(int row, const QString &name, const QString &value);
 
-    seeingforge::SerFile m_serFile;
+    std::shared_ptr<seeingforge::FrameSource> m_source;
     QImage m_rawFrame;
     seeingforge::PreviewImages m_previews;
     QFutureWatcher<seeingforge::PreviewImages> *m_previewWatcher = nullptr;
     QFutureWatcher<seeingforge::HotPixelResult> *m_hotPixelWatcher = nullptr;
     QFutureWatcher<seeingforge::QualityResult> *m_qualityWatcher = nullptr;
     QFutureWatcher<seeingforge::ExportResult> *m_exportWatcher = nullptr;
+    QFutureWatcher<std::shared_ptr<seeingforge::RawSequence>> *m_rawLoadWatcher = nullptr;
+    QDialog *m_rawLoadDialog = nullptr;
+    QLabel *m_rawLoadLabel = nullptr;
+    QProgressBar *m_rawLoadProgress = nullptr;
+    QPushButton *m_rawLoadCancelButton = nullptr;
     bool m_renderDirty = false;
 
     QLabel *m_imageLabel = nullptr;
@@ -110,6 +125,7 @@ private:
     QComboBox *m_bayerPattern = nullptr;
     QComboBox *m_cropMargin = nullptr;
     QComboBox *m_hotPixelSamples = nullptr;
+    QComboBox *m_rawExportWhiteBalance = nullptr;
     QCheckBox *m_whiteBalance = nullptr;
     QCheckBox *m_autoStretch = nullptr;
     QSlider *m_redBalance = nullptr;
@@ -131,6 +147,7 @@ private:
     QLabel *m_hotPixelLabel = nullptr;
     QLabel *m_qualityLabel = nullptr;
     QLabel *m_exportSummary = nullptr;
+    QLabel *m_exportIntensityLabel = nullptr;
     QLabel *m_exportResultLabel = nullptr;
     QSlider *m_hotPixelBrightness = nullptr;
     QSlider *m_hotPixelContrast = nullptr;
@@ -149,6 +166,7 @@ private:
     QPushButton *m_exportButton = nullptr;
     QPushButton *m_cancelExport = nullptr;
     QComboBox *m_outputSizeMode = nullptr;
+    QComboBox *m_exportIntensity = nullptr;
     QSpinBox *m_customOutputWidth = nullptr;
     QSpinBox *m_customOutputHeight = nullptr;
     QTimer *m_frameDebounce = nullptr;
@@ -166,4 +184,5 @@ private:
     seeingforge::QualityResult m_qualityResult;
     std::shared_ptr<std::atomic_bool> m_qualityCancel;
     std::shared_ptr<std::atomic_bool> m_exportCancel;
+    std::shared_ptr<std::atomic_bool> m_rawLoadCancel;
 };

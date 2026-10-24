@@ -138,6 +138,7 @@ private slots:
     void whiteBalanceIgnoresColouredBackgroundNoise();
     void measuresSharperFrameHigher();
     void exportsSelectedFramesCentered();
+    void appliesExportIntensityGain();
     void exportsRgbAsMonochrome();
     void exportsBayerAsBinnedMonochrome();
     void rotatesBayerExportAndRemapsPattern();
@@ -328,6 +329,36 @@ void SerFileTests::exportsSelectedFramesCentered()
     QCOMPARE(output.header().frameCount, 2U);
     QCOMPARE(qGray(output.readFrame(0).pixel(2, 2)), 220);
     QCOMPARE(qGray(output.readFrame(1).pixel(2, 2)), 220);
+}
+
+void SerFileTests::appliesExportIntensityGain()
+{
+    QTemporaryDir directory;
+    const QString inputPath = directory.filePath(QStringLiteral("input.ser"));
+    QFile input(inputPath);
+    QVERIFY(input.open(QIODevice::WriteOnly));
+    input.write(monoSer());
+    input.close();
+
+    seeingforge::SerFile source;
+    QVERIFY2(source.open(inputPath), qPrintable(source.errorString()));
+    seeingforge::SerExportSettings settings;
+    settings.frameIndices = {0};
+    settings.centerObject = false;
+    settings.outputSize = QSize(2, 2);
+    settings.intensityGain = 2.0;
+    const QString outputPath = directory.filePath(QStringLiteral("brighter.ser"));
+    const auto exportResult = seeingforge::SerExporter::exportFrames(
+        source, outputPath, settings);
+    QVERIFY2(exportResult.success, qPrintable(exportResult.error));
+
+    seeingforge::SerFile output;
+    QVERIFY2(output.open(outputPath), qPrintable(output.errorString()));
+    const QImage frame = output.readFrame(0);
+    QCOMPARE(qGray(frame.pixel(0, 0)), 0);
+    QCOMPARE(qGray(frame.pixel(1, 0)), 128);
+    QCOMPARE(qGray(frame.pixel(0, 1)), 255);
+    QCOMPARE(qGray(frame.pixel(1, 1)), 255);
 }
 
 void SerFileTests::exportsRgbAsMonochrome()

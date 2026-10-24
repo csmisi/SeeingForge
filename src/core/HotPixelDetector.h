@@ -5,7 +5,7 @@
 
 namespace seeingforge {
 
-class SerFile;
+class FrameSource;
 
 struct HotPixelSettings {
     int sampleCount = 16;
@@ -22,7 +22,7 @@ struct HotPixelResult {
 
 class HotPixelDetector {
 public:
-    [[nodiscard]] static HotPixelResult detect(const SerFile &file,
+    [[nodiscard]] static HotPixelResult detect(const FrameSource &file,
                                                const HotPixelSettings &settings);
 };
 

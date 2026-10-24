@@ -1,6 +1,6 @@
 # SeeingForge
 
-SeeingForge is an open-source desktop application for preparing planetary and lunar SER recordings for stacking.
+SeeingForge is an open-source desktop application for preparing planetary and lunar SER recordings and DSLR RAW image sequences for stacking.
 
 ![SeeingForge on Fedora 44 showing a lunar SER recording and the Calibration workflow](docs/images/seeingforge-lunar-preview.png)
 
@@ -22,6 +22,7 @@ The application uses C++20 and Qt 6 and is designed for Linux, Windows, and macO
 
 - Guided Source, Calibration, Colour, Stabilize & crop, Quality, and Export workflow.
 - SER input with 8–16-bit monochrome, Bayer, and RGB/BGR data, including INDI recordings.
+- Multi-file or folder import of DSLR RAW sequences through LibRaw, including CR2 and other supported camera formats.
 - Frame navigation, colour and raw previews, fit, actual size, and zoom controls.
 - Preview white balance, saturation, hue, Bayer pattern selection, and display stretching.
 - Persistent hot-pixel detection and inspection overlay.
@@ -29,14 +30,26 @@ The application uses C++20 and Qt 6 and is designed for Linux, Windows, and macO
 - Quality analysis with progress and cancellation; keep the best 10%, 25%, 50%, 75%, or 100%.
 - Capture-order or quality-score inspection and export ordering.
 - SER export with per-frame object centering, fixed crop dimensions, source bit depth, and available frame timestamps.
+- Linear 16-bit Bayer SER export from RAW sequences, with sensor black-level subtraction and white-level normalization.
+- Optional camera white balance for RAW-to-SER export, using highlight-safe normalized channel multipliers from the RAW metadata.
+- Export intensity controls with measured target peak reporting, fixed 2×–16× gains, and automatic target normalization for stacking software.
 - Full-resolution monochrome export with optional 2×2 binning.
 - Export progress and cancellation without committing a partial SER file.
 
 Exports go beside the source in a `seeingforge_yyyymmdd_hhmm` folder; repeated exports within one minute receive a numeric suffix. The original recording is not modified.
 
+## Working with DSLR RAW sequences
+
+Use **File > Open RAW image files…** to select individual frames, or **File > Open RAW image folder…** to load every supported RAW file in one folder. File selection is useful when a folder contains unrelated exposures; folder selection is the quickest choice for a dedicated capture sequence. SeeingForge sorts the selected frames into natural filename order and shows a cancellable loading window while it reads their metadata.
+
+In **Calibration**, choose whether the exported SER should preserve the linear sensor values or apply the camera white balance recorded in the RAW metadata. Preserving the sensor values is intended for workflows that perform background neutralization and colour calibration after stacking. Applying camera white balance produces a more neutral starting point while retaining linear Bayer data.
+
+The crop selected in **Stabilize & crop** remains visible in **Quality** and **Export**. Before export, the intensity panel reports the measured target peak and estimated output peak. Keep the original values for a strictly linear conversion, select a fixed gain, or use automatic normalization when downstream stacking software has difficulty detecting a dim target. Gain is applied uniformly after centering and cropping; values beyond the 16-bit range are clipped.
+
 ## Current limitations
 
 - Colour controls and overlays affect only the preview, not export.
+- A RAW sequence must use one camera, active image size, and 2×2 RGB Bayer pattern. X-Trans, Foveon, and already-demosaiced RAW data are not yet supported.
 - Hot-pixel correction is not implemented; detection is available.
 - Quality scores are experimental and relative to the current recording. Noise and exposure changes can affect ranking; inspect the results.
 - Centering uses the largest detected object's bounding box, not subpixel registration. A frame with no detection falls back to the source center. Bayer shifts use even-pixel offsets; uncovered edges are black.
@@ -53,10 +66,10 @@ system security warning on first launch.
 
 ### Build from source
 
-Requires a C++20 compiler, CMake 3.25+, Ninja, and Qt 6.6+ with Core, Gui, Widgets, Concurrent, and Test. On Fedora 44:
+Requires a C++20 compiler, CMake 3.25+, Ninja, LibRaw, and Qt 6.6+ with Core, Gui, Widgets, Concurrent, and Test. On Fedora 44:
 
 ```bash
-sudo dnf install gcc-c++ cmake ninja-build qt6-qtbase-devel
+sudo dnf install gcc-c++ cmake ninja-build qt6-qtbase-devel LibRaw-devel
 git clone https://github.com/csmisi/SeeingForge.git
 cd SeeingForge
 ```
@@ -68,7 +81,7 @@ ctest --test-dir build --output-on-failure
 ./build/seeingforge
 ```
 
-The intended Windows build route is Qt Creator with a matching Qt 6/MSVC desktop kit and CMake. This route still requires testing.
+On Debian or Ubuntu, install `libraw-dev`; on macOS, install `libraw` with Homebrew. The intended Windows build route is Qt Creator with a matching Qt 6/MSVC desktop kit, CMake, and LibRaw (for example through vcpkg). These routes still require runtime testing.
 
 ## Feature requests and contributions
 

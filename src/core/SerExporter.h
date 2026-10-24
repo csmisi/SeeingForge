@@ -9,7 +9,7 @@
 
 namespace seeingforge {
 
-class SerFile;
+class FrameSource;
 
 struct ExportResult {
     bool success = false;
@@ -25,6 +25,8 @@ struct SerExportSettings {
     bool centerObject = true;
     bool monochrome = false;
     bool binMonochrome = false;
+    bool applyCameraWhiteBalance = false;
+    double intensityGain = 1.0;
     int detectionThreshold = 12;
     QSize outputSize;
     int rotationQuarterTurns = 0;
@@ -35,7 +37,7 @@ struct SerExportSettings {
 class SerExporter {
 public:
     [[nodiscard]] static ExportResult exportFrames(
-        const SerFile &source, const QString &outputPath,
+        const FrameSource &source, const QString &outputPath,
         const SerExportSettings &settings,
         const std::function<void(int, int)> &progress = {},
         const std::function<bool()> &shouldCancel = {});

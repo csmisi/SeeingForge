@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(SeeingForge VERSION 0.1.3 LANGUAGES CXX)
+project(SeeingForge VERSION 0.2.0 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 
@@ -10,6 +10,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_AUTOMOC ON)
 
 find_package(Qt6 6.6 REQUIRED COMPONENTS Core Concurrent Gui Widgets Test)
+find_path(LIBRAW_INCLUDE_DIR NAMES libraw/libraw.h REQUIRED)
+find_library(LIBRAW_LIBRARY NAMES raw_r raw libraw REQUIRED)
 
 add_library(seeingforge_core
     src/core/HotPixelDetector.cpp
@@ -20,13 +22,16 @@ add_library(seeingforge_core
     src/core/PreviewProcessor.h
     src/core/QualityAnalyzer.cpp
     src/core/QualityAnalyzer.h
+    src/core/FrameSource.h
+    src/core/RawSequence.cpp
+    src/core/RawSequence.h
     src/core/SerFile.cpp
     src/core/SerFile.h
     src/core/SerExporter.cpp
     src/core/SerExporter.h
 )
-target_link_libraries(seeingforge_core PUBLIC Qt6::Core Qt6::Gui)
-target_include_directories(seeingforge_core PUBLIC src)
+target_link_libraries(seeingforge_core PUBLIC Qt6::Core Qt6::Gui PRIVATE ${LIBRAW_LIBRARY})
+target_include_directories(seeingforge_core PUBLIC src PRIVATE ${LIBRAW_INCLUDE_DIR})
 target_compile_options(seeingforge_core PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Wconversion>
 )
@@ -47,6 +52,9 @@ set_target_properties(seeingforge PROPERTIES
 
 add_executable(seeingforge_ser_probe tools/SerProbe.cpp)
 target_link_libraries(seeingforge_ser_probe PRIVATE seeingforge_core Qt6::Core)
+
+add_executable(seeingforge_raw_probe tools/RawProbe.cpp)
+target_link_libraries(seeingforge_raw_probe PRIVATE seeingforge_core Qt6::Core)
 
 include(CTest)
 if(BUILD_TESTING)

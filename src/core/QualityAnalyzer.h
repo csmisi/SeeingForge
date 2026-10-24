@@ -8,7 +8,7 @@
 
 namespace seeingforge {
 
-class SerFile;
+class FrameSource;
 
 struct FrameQuality {
     std::uint32_t frameIndex = 0;
@@ -32,7 +32,7 @@ public:
     [[nodiscard]] static FrameQuality measureFrame(const QImage &frame,
                                                    std::uint32_t frameIndex,
                                                    int backgroundThreshold = 12);
-    [[nodiscard]] static QualityResult analyze(const SerFile &file,
+    [[nodiscard]] static QualityResult analyze(const FrameSource &file,
         int backgroundThreshold = 12,
         const std::function<void(int, int)> &progress = {},
         const std::function<bool()> &shouldCancel = {});

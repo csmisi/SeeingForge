@@ -1,5 +1,6 @@
 #include "core/HotPixelDetector.h"
 
+#include "core/FrameSource.h"
 #include "core/SerFile.h"
 
 #include <QImage>
@@ -27,7 +28,7 @@ bool isLocalHotPixel(const QImage &frame, int x, int y,
 
 } // namespace
 
-HotPixelResult HotPixelDetector::detect(const SerFile &file,
+HotPixelResult HotPixelDetector::detect(const FrameSource &file,
                                         const HotPixelSettings &settings)
 {
     HotPixelResult result;

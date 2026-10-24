@@ -1,6 +1,7 @@
 #include "core/SerFile.h"
 
 #include <QFile>
+#include <QFileInfo>
 #include <QtEndian>
 
 #include <algorithm>
@@ -193,7 +194,9 @@ void SerFile::close()
 }
 
 bool SerFile::isOpen() const { return m_isOpen; }
-const QString &SerFile::path() const { return m_path; }
+QString SerFile::path() const { return m_path; }
+QString SerFile::displayName() const { return QFileInfo(m_path).fileName(); }
+QString SerFile::sourceDirectory() const { return QFileInfo(m_path).absolutePath(); }
 const SerHeader &SerFile::header() const { return m_header; }
 const QString &SerFile::errorString() const { return m_error; }
 
@@ -267,6 +270,20 @@ QImage SerFile::decodeFrame(const QByteArray &frame) const
         }
     }
     return image;
+}
+
+std::uint64_t SerFile::frameTimestamp(std::uint32_t index) const
+{
+    if (!m_isOpen || index >= m_header.frameCount) return 0;
+    QFile file(m_path);
+    if (!file.open(QIODevice::ReadOnly)) return 0;
+    const std::uint64_t offset = HeaderSize + m_header.bytesPerFrame() * m_header.frameCount
+                                 + 8U * index;
+    if (offset + 8U > static_cast<std::uint64_t>(file.size())
+        || !file.seek(static_cast<qint64>(offset))) return 0;
+    const QByteArray bytes = file.read(8);
+    if (bytes.size() != 8) return 0;
+    return qFromLittleEndian<std::uint64_t>(reinterpret_cast<const uchar *>(bytes.constData()));
 }
 
 } // namespace seeingforge
