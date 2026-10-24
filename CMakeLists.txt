@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(SeeingForge VERSION 0.2.1 LANGUAGES CXX)
+project(SeeingForge VERSION 0.2.2 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 
@@ -14,6 +14,8 @@ find_path(LIBRAW_INCLUDE_DIR NAMES libraw/libraw.h REQUIRED)
 find_library(LIBRAW_LIBRARY NAMES raw_r raw libraw REQUIRED)
 
 add_library(seeingforge_core
+    src/core/BayerPatternAnalyzer.cpp
+    src/core/BayerPatternAnalyzer.h
     src/core/HotPixelDetector.cpp
     src/core/HotPixelDetector.h
     src/core/ObjectDetector.cpp

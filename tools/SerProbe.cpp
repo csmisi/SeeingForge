@@ -2,6 +2,7 @@
 #include "core/PreviewProcessor.h"
 #include "core/ObjectDetector.h"
 #include "core/HotPixelDetector.h"
+#include "core/BayerPatternAnalyzer.h"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -38,6 +39,16 @@ int main(int argc, char *argv[])
         return 1;
     }
     output << "First frame: decoded successfully\n";
+    const auto bayerAnalysis = seeingforge::BayerPatternAnalyzer::analyze(
+        firstFrame, header.colorId);
+    if (bayerAnalysis.discrepancy) {
+        seeingforge::SerHeader suggested = header;
+        suggested.colorId = bayerAnalysis.suggestedColorId;
+        output << "Probable Bayer metadata mismatch: " << header.colorName()
+               << " -> " << suggested.colorName() << " (confidence "
+               << QString::number(bayerAnalysis.confidence * 100.0, 'f', 1)
+               << "%)\n";
+    }
     QElapsedTimer timer;
     timer.start();
     const auto previews = seeingforge::PreviewProcessor::render(

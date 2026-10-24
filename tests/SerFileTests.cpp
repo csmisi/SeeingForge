@@ -4,6 +4,7 @@
 #include "core/HotPixelDetector.h"
 #include "core/QualityAnalyzer.h"
 #include "core/SerExporter.h"
+#include "core/BayerPatternAnalyzer.h"
 
 #include <QFile>
 #include <QFileInfo>
@@ -142,6 +143,10 @@ private slots:
     void exportsRgbAsMonochrome();
     void exportsBayerAsBinnedMonochrome();
     void rotatesBayerExportAndRemapsPattern();
+    void detectsProbableRoiBayerMismatch();
+    void calculatesHighlightSafeNeutralBalance();
+    void exportsUsingSelectedBayerPattern();
+    void appliesBayerChannelGains();
     void cancelsSlowOperationsCleanly();
     void detectsObjectAndAddsCropMargin();
     void detectsPersistentHotPixel();
@@ -457,6 +462,102 @@ void SerFileTests::rotatesBayerExportAndRemapsPattern()
     QCOMPARE(output.header().colorId, 9U); // RGGB rotated clockwise becomes GRBG.
     QCOMPARE(output.header().width, 4U);
     QCOMPARE(output.header().height, 4U);
+}
+
+void SerFileTests::detectsProbableRoiBayerMismatch()
+{
+    QImage raw(128, 128, QImage::Format_Grayscale8);
+    for (int y = 0; y < raw.height(); ++y) {
+        uchar *line = raw.scanLine(y);
+        for (int x = 0; x < raw.width(); ++x) {
+            const int gradient = (x + y) / 16;
+            if ((y & 1) == 0 && (x & 1) == 0) line[x] = static_cast<uchar>(100 + gradient);
+            else if ((y & 1) != 0 && (x & 1) != 0) line[x] = static_cast<uchar>(100 + gradient);
+            else if ((y & 1) != 0) line[x] = static_cast<uchar>(180 + gradient);
+            else line[x] = static_cast<uchar>(50 + gradient);
+        }
+    }
+
+    const auto analysis = seeingforge::BayerPatternAnalyzer::analyze(raw, 8);
+    QVERIFY(analysis.discrepancy);
+    QCOMPARE(analysis.suggestedColorId, 10U);
+    QVERIFY(analysis.confidence > 0.35);
+
+    const auto matching = seeingforge::BayerPatternAnalyzer::analyze(raw, 10);
+    QVERIFY(!matching.discrepancy);
+    QCOMPARE(matching.suggestedColorId, 10U);
+}
+
+void SerFileTests::calculatesHighlightSafeNeutralBalance()
+{
+    QImage raw(32, 32, QImage::Format_Grayscale8);
+    for (int y = 0; y < raw.height(); ++y) {
+        uchar *line = raw.scanLine(y);
+        for (int x = 0; x < raw.width(); ++x) {
+            if ((y & 1) == 0 && (x & 1) == 0) line[x] = 200;
+            else if ((y & 1) != 0 && (x & 1) != 0) line[x] = 50;
+            else line[x] = 100;
+        }
+    }
+    const auto gains = seeingforge::BayerPatternAnalyzer::neutralBalanceGains(raw, 8);
+    QCOMPARE(gains[0], 0.25);
+    QCOMPARE(gains[1], 0.5);
+    QCOMPARE(gains[2], 1.0);
+}
+
+void SerFileTests::exportsUsingSelectedBayerPattern()
+{
+    QTemporaryDir directory;
+    const QString inputPath = directory.filePath(QStringLiteral("bayer-override.ser"));
+    QFile input(inputPath);
+    QVERIFY(input.open(QIODevice::WriteOnly));
+    input.write(bayerSer());
+    input.close();
+
+    seeingforge::SerFile source;
+    QVERIFY2(source.open(inputPath), qPrintable(source.errorString()));
+    seeingforge::SerExportSettings settings;
+    settings.frameIndices = {0};
+    settings.centerObject = false;
+    settings.outputSize = QSize(4, 4);
+    settings.sourceColorId = 10;
+    settings.rotationQuarterTurns = 3;
+    const QString outputPath = directory.filePath(QStringLiteral("corrected-bayer.ser"));
+    const auto exportResult = seeingforge::SerExporter::exportFrames(
+        source, outputPath, settings);
+    QVERIFY2(exportResult.success, qPrintable(exportResult.error));
+
+    seeingforge::SerFile output;
+    QVERIFY2(output.open(outputPath), qPrintable(output.errorString()));
+    QCOMPARE(output.header().colorId, 11U); // GBRG rotated counter-clockwise becomes BGGR.
+}
+
+void SerFileTests::appliesBayerChannelGains()
+{
+    QTemporaryDir directory;
+    const QString inputPath = directory.filePath(QStringLiteral("bayer-gains.ser"));
+    QFile input(inputPath);
+    QVERIFY(input.open(QIODevice::WriteOnly));
+    input.write(bayerSer());
+    input.close();
+
+    seeingforge::SerFile source;
+    QVERIFY2(source.open(inputPath), qPrintable(source.errorString()));
+    seeingforge::SerExportSettings settings;
+    settings.frameIndices = {0};
+    settings.centerObject = false;
+    settings.outputSize = QSize(4, 4);
+    settings.bayerChannelGains = {0.25, 0.5, 1.0};
+    const QString outputPath = directory.filePath(QStringLiteral("balanced.ser"));
+    const auto result = seeingforge::SerExporter::exportFrames(source, outputPath, settings);
+    QVERIFY2(result.success, qPrintable(result.error));
+
+    seeingforge::SerFile output;
+    QVERIFY(output.open(outputPath));
+    const QByteArray frame = output.readRawFrame(0);
+    QCOMPARE(static_cast<uchar>(frame[0]), static_cast<uchar>(50));
+    QCOMPARE(static_cast<uchar>(frame[1]), static_cast<uchar>(50));
+    QCOMPARE(static_cast<uchar>(frame[5]), static_cast<uchar>(0));
 }
 
 void SerFileTests::cancelsSlowOperationsCleanly()

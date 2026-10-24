@@ -8,6 +8,7 @@
 #include "core/HotPixelDetector.h"
 #include "core/QualityAnalyzer.h"
 #include "core/SerExporter.h"
+#include "core/BayerPatternAnalyzer.h"
 
 #include <QFutureWatcher>
 #include <QMainWindow>
@@ -18,6 +19,7 @@
 class QAction;
 class QButtonGroup;
 class QCheckBox;
+class QCloseEvent;
 class QComboBox;
 class QLabel;
 class QListWidget;
@@ -40,6 +42,7 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
 
 protected:
+    void closeEvent(QCloseEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
 
 private slots:
@@ -86,6 +89,7 @@ private:
     void loadRawFiles(const QStringList &paths);
     void rawSequenceLoadFinished();
     void finishLoadingSource();
+    void checkBayerMetadata();
     void loadFrame(std::uint32_t index);
     void startPreviewRender();
     seeingforge::PreviewSettings previewSettings() const;
@@ -95,6 +99,9 @@ private:
     void updateMetadata();
     void updateExportIntensityDisplay();
     double selectedExportIntensityGain() const;
+    void loadUserPreferences();
+    void savePreferredChoices();
+    void resetCurrentStep();
     void setMetadataRow(int row, const QString &name, const QString &value);
 
     std::shared_ptr<seeingforge::FrameSource> m_source;
@@ -123,6 +130,7 @@ private:
     QTableWidget *m_metadataTable = nullptr;
     QComboBox *m_debayerMethod = nullptr;
     QComboBox *m_bayerPattern = nullptr;
+    QLabel *m_bayerWarning = nullptr;
     QComboBox *m_cropMargin = nullptr;
     QComboBox *m_hotPixelSamples = nullptr;
     QComboBox *m_rawExportWhiteBalance = nullptr;

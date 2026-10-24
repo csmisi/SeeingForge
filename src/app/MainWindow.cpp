@@ -4,6 +4,7 @@
 #include <QApplication>
 #include <QButtonGroup>
 #include <QCheckBox>
+#include <QCloseEvent>
 #include <QComboBox>
 #include <QDir>
 #include <QDateTime>
@@ -30,6 +31,7 @@
 #include <QSettings>
 #include <QSlider>
 #include <QSpinBox>
+#include <QSplitter>
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QTableWidget>
@@ -130,6 +132,19 @@ MainWindow::MainWindow(QWidget *parent)
     createActions();
     createMenus();
     createWorkspace();
+    loadUserPreferences();
+    QSettings windowSettings;
+    const QByteArray savedGeometry = windowSettings.value(
+        QStringLiteral("window/geometry")).toByteArray();
+    if (!savedGeometry.isEmpty()) restoreGeometry(savedGeometry);
+    const bool startFullScreen = windowSettings.value(
+        QStringLiteral("window/fullScreen"), false).toBool();
+    const bool startMaximized = windowSettings.value(
+        QStringLiteral("window/maximized"), false).toBool();
+    QTimer::singleShot(0, this, [this, startFullScreen, startMaximized] {
+        if (startFullScreen) showFullScreen();
+        else if (startMaximized) showMaximized();
+    });
 
     m_rawLoadDialog = new QDialog(this);
     m_rawLoadDialog->setWindowTitle(tr("Loading RAW Sequence"));
@@ -245,8 +260,11 @@ void MainWindow::createMenus()
     viewMenu->addAction(m_fitAction);
     viewMenu->addAction(m_actualSizeAction);
     auto *processingMenu = menuBar()->addMenu(tr("&Processing"));
-    processingMenu->addAction(tr("Save Workflow Preset…"))->setEnabled(false);
-    processingMenu->addAction(tr("Reset Current Step"))->setEnabled(false);
+    auto *saveDefaultsAction = processingMenu->addAction(tr("Save Preferred Choices"));
+    connect(saveDefaultsAction, &QAction::triggered,
+            this, &MainWindow::savePreferredChoices);
+    auto *resetAction = processingMenu->addAction(tr("Reset Current Step to Defaults"));
+    connect(resetAction, &QAction::triggered, this, &MainWindow::resetCurrentStep);
     auto *helpMenu = menuBar()->addMenu(tr("&Help"));
     helpMenu->addAction(findChild<QAction *>(QStringLiteral("aboutAction")));
 }
@@ -257,9 +275,17 @@ void MainWindow::createWorkspace()
     auto *layout = new QHBoxLayout(workspace);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
-    layout->addWidget(createWorkflowPanel());
-    layout->addWidget(createPreviewPanel(), 1);
-    layout->addWidget(createInspectorPanel());
+    auto *splitter = new QSplitter(Qt::Horizontal, workspace);
+    splitter->setChildrenCollapsible(false);
+    splitter->setHandleWidth(5);
+    splitter->addWidget(createWorkflowPanel());
+    splitter->addWidget(createPreviewPanel());
+    splitter->addWidget(createInspectorPanel());
+    splitter->setStretchFactor(0, 0);
+    splitter->setStretchFactor(1, 1);
+    splitter->setStretchFactor(2, 0);
+    splitter->setSizes({220, 900, 340});
+    layout->addWidget(splitter, 1);
     setCentralWidget(workspace);
 }
 
@@ -278,7 +304,7 @@ QWidget *MainWindow::createWorkflowPanel()
     heading->setStyleSheet(QStringLiteral("color: #aab2bd; font-size: 11px; letter-spacing: 1px;"));
     layout->addWidget(heading);
     m_workflowList = new QListWidget(panel);
-    m_workflowList->addItems({tr("1  Source"), tr("2  Calibration"), tr("3  Colour"),
+    m_workflowList->addItems({tr("1  Source"), tr("2  Calibration"), tr("3  Color"),
                               tr("4  Stabilize & crop"), tr("5  Quality"), tr("6  Export")});
     m_workflowList->setCurrentRow(0);
     connect(m_workflowList, &QListWidget::currentRowChanged,
@@ -302,7 +328,7 @@ QWidget *MainWindow::createPreviewPanel()
     auto *bar = new QFrame(panel);
     bar->setStyleSheet(QStringLiteral("background: palette(window); border-bottom: 1px solid palette(mid);"));
     auto *barLayout = new QHBoxLayout(bar);
-    auto *title = new QLabel(tr("Colour preview"), bar);
+    auto *title = new QLabel(tr("Color preview"), bar);
     QFont titleFont = title->font();
     titleFont.setBold(true);
     title->setFont(titleFont);
@@ -313,7 +339,7 @@ QWidget *MainWindow::createPreviewPanel()
     barLayout->addStretch();
     m_previewMode = new QButtonGroup(this);
     auto *processedButton = new QToolButton(bar);
-    processedButton->setText(tr("Colour"));
+    processedButton->setText(tr("Color"));
     processedButton->setCheckable(true);
     processedButton->setChecked(true);
     auto *originalButton = new QToolButton(bar);
@@ -405,7 +431,9 @@ QWidget *MainWindow::createInspectorPanel()
 {
     auto *panel = new QFrame(this);
     panel->setObjectName(QStringLiteral("inspectorPanel"));
-    panel->setFixedWidth(285);
+    panel->setMinimumWidth(320);
+    panel->setMaximumWidth(520);
+    panel->resize(340, panel->height());
     panel->setStyleSheet(QStringLiteral("#inspectorPanel { border-left: 1px solid palette(mid); background: palette(window); }"));
     auto *layout = new QVBoxLayout(panel);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -447,10 +475,10 @@ QWidget *MainWindow::createColourInspector()
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->setContentsMargins(18, 16, 18, 16);
-    layout->addWidget(new QLabel(tr("<h2>Colour</h2><p>Changes update the preview without altering the source.</p>"), page));
+    layout->addWidget(new QLabel(tr("<h2>Color</h2><p>Changes update the preview without altering the source.</p>"), page));
     layout->addWidget(new QLabel(tr("Debayer method"), page));
     m_debayerMethod = new QComboBox(page);
-    m_debayerMethod->addItem(tr("Bayer-aware colour preview"), true);
+    m_debayerMethod->addItem(tr("Bayer-aware color preview"), true);
     m_debayerMethod->addItem(tr("No debayer — neutral raw preview"), false);
     connect(m_debayerMethod, &QComboBox::currentIndexChanged, this, &MainWindow::requestPreviewRender);
     layout->addWidget(m_debayerMethod);
@@ -464,6 +492,13 @@ QWidget *MainWindow::createColourInspector()
     connect(m_bayerPattern, &QComboBox::currentIndexChanged,
             this, &MainWindow::requestPreviewRender);
     layout->addWidget(m_bayerPattern);
+    m_bayerWarning = new QLabel(page);
+    m_bayerWarning->setWordWrap(true);
+    m_bayerWarning->setStyleSheet(QStringLiteral(
+        "color: #f0c96a; background: rgba(240, 201, 106, 0.08); "
+        "border: 1px solid rgba(240, 201, 106, 0.35); border-radius: 4px; padding: 8px;"));
+    m_bayerWarning->hide();
+    layout->addWidget(m_bayerWarning);
     m_whiteBalance = new QCheckBox(tr("Automatic white balance"), page);
     m_whiteBalance->setChecked(true);
     connect(m_whiteBalance, &QCheckBox::toggled, this, &MainWindow::requestPreviewRender);
@@ -489,7 +524,7 @@ QWidget *MainWindow::createColourInspector()
     m_saturation = new QSlider(Qt::Horizontal, page);
     m_saturation->setRange(0, 400);
     m_saturation->setValue(100);
-    m_saturation->setToolTip(tr("0% is monochrome; higher values reveal weak colour differences."));
+    m_saturation->setToolTip(tr("0% is monochrome; higher values reveal weak color differences."));
     connect(m_saturation, &QSlider::valueChanged, this,
             [this, saturationLabel](int value) {
                 saturationLabel->setText(tr("Saturation: %1%").arg(value));
@@ -502,7 +537,7 @@ QWidget *MainWindow::createColourInspector()
     m_hue = new QSlider(Qt::Horizontal, page);
     m_hue->setRange(-180, 180);
     m_hue->setValue(0);
-    m_hue->setToolTip(tr("Rotate all colours while preserving brightness."));
+    m_hue->setToolTip(tr("Rotate all colors while preserving brightness."));
     connect(m_hue, &QSlider::valueChanged, this,
             [this, hueLabel](int value) {
                 hueLabel->setText(tr("Hue shift: %1°").arg(value));
@@ -528,28 +563,12 @@ QWidget *MainWindow::createColourInspector()
     addTone(tr("Preview gain"), &m_gain, 25, 400, 100);
     addTone(tr("Preview gamma"), &m_gamma, 25, 300, 100);
 
-    layout->addWidget(new QLabel(tr("Orientation"), page));
-    m_orientation = new QComboBox(page);
-    m_orientation->addItem(tr("No rotation"), 0);
-    m_orientation->addItem(tr("Rotate 90° clockwise"), 1);
-    m_orientation->addItem(tr("Rotate 180°"), 2);
-    m_orientation->addItem(tr("Rotate 90° counter-clockwise"), 3);
-    connect(m_orientation, &QComboBox::currentIndexChanged,
-            this, &MainWindow::requestPreviewRender);
-    layout->addWidget(m_orientation);
-    m_flipHorizontal = new QCheckBox(tr("Flip horizontally"), page);
-    m_flipVertical = new QCheckBox(tr("Flip vertically"), page);
-    connect(m_flipHorizontal, &QCheckBox::toggled, this, &MainWindow::requestPreviewRender);
-    connect(m_flipVertical, &QCheckBox::toggled, this, &MainWindow::requestPreviewRender);
-    layout->addWidget(m_flipHorizontal);
-    layout->addWidget(m_flipVertical);
-
     m_autoStretch = new QCheckBox(tr("Auto-stretch preview"), page);
     m_autoStretch->setChecked(true);
     connect(m_autoStretch, &QCheckBox::toggled, this, &MainWindow::requestPreviewRender);
     layout->addWidget(m_autoStretch);
     auto *note = new QLabel(
-        tr("<b>Preview only:</b> These colour adjustments do not modify the source "
+        tr("<b>Preview only:</b> These color adjustments do not modify the source "
            "or its raw pixel data."), page);
     note->setWordWrap(true);
     note->setStyleSheet(QStringLiteral(
@@ -570,16 +589,15 @@ QWidget *MainWindow::createCalibrationInspector()
     layout->setContentsMargins(18, 16, 18, 16);
     layout->addWidget(new QLabel(tr("<h2>Calibration</h2><p>Find persistent sensor defects across the recording.</p>"), page));
 
-    layout->addWidget(new QLabel(tr("RAW export colour calibration"), page));
+    layout->addWidget(new QLabel(tr("RAW export color calibration"), page));
     m_rawExportWhiteBalance = new QComboBox(page);
-    m_rawExportWhiteBalance->addItem(tr("Preserve linear sensor values"), false);
-    m_rawExportWhiteBalance->addItem(tr("Apply camera white balance"), true);
+    m_rawExportWhiteBalance->addItem(tr("Preserve linear sensor values"), 0);
     m_rawExportWhiteBalance->setEnabled(false);
     m_rawExportWhiteBalance->setToolTip(
-        tr("Camera white balance is available after loading a compatible DSLR RAW sequence."));
+        tr("Choose how Bayer channel levels are written to the exported SER."));
     layout->addWidget(m_rawExportWhiteBalance);
     auto *whiteBalanceNote = new QLabel(
-        tr("Linear preserves the normalized sensor response. Camera white balance produces a more neutral SER by applying the RAW file's recorded channel multipliers without clipping highlights."), page);
+        tr("Linear preserves the normalized sensor response. Camera white balance uses RAW metadata. Automatic neutral balance measures the target and only reduces stronger channels, preserving highlights."), page);
     whiteBalanceNote->setWordWrap(true);
     whiteBalanceNote->setStyleSheet(QStringLiteral("color: #aab2bd;"));
     layout->addWidget(whiteBalanceNote);
@@ -629,7 +647,7 @@ QWidget *MainWindow::createCalibrationInspector()
     note->setStyleSheet(QStringLiteral("color: #aab2bd;"));
     layout->addWidget(note);
     layout->addStretch();
-    auto *continueButton = new QPushButton(tr("Continue to colour"), page);
+    auto *continueButton = new QPushButton(tr("Continue to color"), page);
     connect(continueButton, &QPushButton::clicked, this,
             [this] { m_workflowList->setCurrentRow(2); });
     layout->addWidget(continueButton);
@@ -656,6 +674,22 @@ QWidget *MainWindow::createStabilizeInspector()
     auto *layout = new QVBoxLayout(page);
     layout->setContentsMargins(18, 16, 18, 16);
     layout->addWidget(new QLabel(tr("<h2>Stabilize & crop</h2><p>Detect the target and define safe surrounding space.</p>"), page));
+
+    layout->addWidget(new QLabel(tr("Output orientation"), page));
+    m_orientation = new QComboBox(page);
+    m_orientation->addItem(tr("No rotation"), 0);
+    m_orientation->addItem(tr("Rotate 90° clockwise"), 1);
+    m_orientation->addItem(tr("Rotate 180°"), 2);
+    m_orientation->addItem(tr("Rotate 90° counter-clockwise"), 3);
+    connect(m_orientation, &QComboBox::currentIndexChanged,
+            this, &MainWindow::requestPreviewRender);
+    layout->addWidget(m_orientation);
+    m_flipHorizontal = new QCheckBox(tr("Flip horizontally"), page);
+    m_flipVertical = new QCheckBox(tr("Flip vertically"), page);
+    connect(m_flipHorizontal, &QCheckBox::toggled, this, &MainWindow::requestPreviewRender);
+    connect(m_flipVertical, &QCheckBox::toggled, this, &MainWindow::requestPreviewRender);
+    layout->addWidget(m_flipHorizontal);
+    layout->addWidget(m_flipVertical);
 
     auto *thresholdLabel = new QLabel(tr("Detection threshold: 16"), page);
     m_detectionThreshold = new QSlider(Qt::Horizontal, page);
@@ -746,8 +780,10 @@ QWidget *MainWindow::createQualityInspector()
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->setContentsMargins(18, 16, 18, 16);
-    layout->addWidget(new QLabel(
-        tr("<h2>Quality</h2><p>Rank frames by target-local fine detail, contrast, exposure stability, and clipping.</p>"), page));
+    auto *heading = new QLabel(
+        tr("<h2>Quality</h2><p>Rank frames by target-local fine detail, contrast, exposure stability, and clipping.</p>"), page);
+    heading->setWordWrap(true);
+    layout->addWidget(heading);
 
     m_analyzeQuality = new QPushButton(tr("Analyze all frames"), page);
     connect(m_analyzeQuality, &QPushButton::clicked,
@@ -785,13 +821,14 @@ QWidget *MainWindow::createQualityInspector()
     m_rejectClipped = new QCheckBox(tr("Reject overexposed frames"), page);
     m_rejectClipped->setChecked(true);
     layout->addWidget(m_rejectClipped);
+    layout->addWidget(new QLabel(tr("Maximum clipped target pixels"), page));
     auto *clippedRow = new QHBoxLayout;
-    clippedRow->addWidget(new QLabel(tr("Maximum clipped target pixels"), page));
     m_maxClippedPercent = new QSpinBox(page);
     m_maxClippedPercent->setRange(1, 100);
     m_maxClippedPercent->setValue(5);
     m_maxClippedPercent->setSuffix(QStringLiteral("%"));
     clippedRow->addWidget(m_maxClippedPercent);
+    clippedRow->addStretch();
     layout->addLayout(clippedRow);
     connect(m_rejectClipped, &QCheckBox::toggled,
             m_maxClippedPercent, &QSpinBox::setEnabled);
@@ -851,8 +888,10 @@ QWidget *MainWindow::createExportInspector()
     auto *page = new QWidget(this);
     auto *layout = new QVBoxLayout(page);
     layout->setContentsMargins(18, 16, 18, 16);
-    layout->addWidget(new QLabel(
-        tr("<h2>Export</h2><p>Create a stabilized SER recording from the selected frames.</p>"), page));
+    auto *heading = new QLabel(
+        tr("<h2>Export</h2><p>Create a stabilized SER recording from the selected frames.</p>"), page);
+    heading->setWordWrap(true);
+    layout->addWidget(heading);
 
     layout->addWidget(new QLabel(tr("Format"), page));
     auto *format = new QComboBox(page);
@@ -881,7 +920,7 @@ QWidget *MainWindow::createExportInspector()
         tr("Convert to monochrome at full resolution. The source file is never changed."));
     layout->addWidget(m_exportMonochrome);
     auto *monochromeWarning = new QLabel(
-        tr("The exported copy will permanently discard all colour information."), page);
+        tr("The exported copy will permanently discard all color information."), page);
     monochromeWarning->setWordWrap(true);
     monochromeWarning->setStyleSheet(QStringLiteral("color: #f0c96a; font-weight: 600;"));
     layout->addWidget(monochromeWarning);
@@ -905,7 +944,7 @@ QWidget *MainWindow::createExportInspector()
     auto *processing = new QLabel(
         tr("<b>Applied:</b> quality selection and order, recommended crop size, "
            "and per-frame object centering.<br><br>"
-           "SER metadata is preserved. Raw values remain unchanged at 1× unless camera white balance or an intensity increase is selected. Preview colour controls and overlays remain preview-only."), page);
+           "SER metadata is preserved. Raw values remain unchanged at 1× unless a calibration balance or an intensity increase is selected. Preview colour controls and overlays remain preview-only."), page);
     processing->setWordWrap(true);
     processing->setStyleSheet(QStringLiteral(
         "color: #aab2bd; background: rgba(255,255,255,0.035); "
@@ -1074,9 +1113,8 @@ void MainWindow::finishLoadingSource()
     m_frameSlider->setEnabled(true);
     m_debayerMethod->setEnabled(seeingforge::PreviewProcessor::supportsDebayer(m_source->header().colorId));
     m_bayerPattern->setItemText(0, tr("From source — %1").arg(m_source->header().colorName()));
-    const bool hasCameraWhiteBalance = m_source->hasCameraWhiteBalance();
-    m_rawExportWhiteBalance->setEnabled(hasCameraWhiteBalance);
-    if (!hasCameraWhiteBalance) m_rawExportWhiteBalance->setCurrentIndex(0);
+    m_bayerPattern->setCurrentIndex(0);
+    m_bayerWarning->hide();
     m_hotPixels = {};
     m_hotPixelLabel->setText(tr("Analysis has not been run."));
     m_qualityResult = {};
@@ -1085,9 +1123,52 @@ void MainWindow::finishLoadingSource()
     m_qualityLabel->setText(tr("Quality has not been analyzed."));
     m_workflowList->setCurrentRow(0);
     loadFrame(0);
+    checkBayerMetadata();
+    m_rawExportWhiteBalance->clear();
+    m_rawExportWhiteBalance->addItem(tr("Preserve linear sensor values"), 0);
+    if (m_source->hasCameraWhiteBalance())
+        m_rawExportWhiteBalance->addItem(tr("Apply camera white balance"), 1);
+    if (seeingforge::PreviewProcessor::supportsDebayer(effectiveColorId()))
+        m_rawExportWhiteBalance->addItem(tr("Apply automatic neutral balance"), 2);
+    const int preferredBalance = QSettings().value(
+        QStringLiteral("preferences/calibration/sensorBalance"), 0).toInt();
+    const int preferredBalanceIndex = m_rawExportWhiteBalance->findData(preferredBalance);
+    m_rawExportWhiteBalance->setCurrentIndex(
+        preferredBalanceIndex >= 0 ? preferredBalanceIndex : 0);
+    m_rawExportWhiteBalance->setEnabled(m_rawExportWhiteBalance->count() > 1);
     updateMetadata();
     setWindowTitle(QStringLiteral("%1 — SeeingForge").arg(m_source->displayName()));
     statusBar()->showMessage(tr("Loaded %1").arg(m_source->displayName()));
+}
+
+void MainWindow::checkBayerMetadata()
+{
+    if (!std::dynamic_pointer_cast<seeingforge::SerFile>(m_source)) return;
+    const auto analysis = seeingforge::BayerPatternAnalyzer::analyze(
+        m_rawFrame, m_source->header().colorId);
+    if (!analysis.discrepancy) return;
+
+    const int suggestedIndex = m_bayerPattern->findData(analysis.suggestedColorId);
+    if (suggestedIndex >= 0) m_bayerPattern->setCurrentIndex(suggestedIndex);
+    seeingforge::SerHeader suggestedHeader = m_source->header();
+    suggestedHeader.colorId = analysis.suggestedColorId;
+    m_bayerWarning->setText(
+        tr("<b>Probable Bayer mismatch:</b> metadata says %1; the mosaic looks like %2. "
+           "ROI capture commonly causes this. SeeingForge selected %2. Temporarily increase "
+           "Saturation and compare patterns; keep the one with natural, even color and no "
+           "checkerboard cast.")
+            .arg(m_source->header().colorName(), suggestedHeader.colorName()));
+    m_bayerWarning->show();
+    QMessageBox::warning(
+        this, tr("Probable Bayer Metadata Mismatch"),
+        tr("The recorded Bayer pattern (%1) does not match the pixel mosaic. "
+           "SeeingForge detected %2 as the probable pattern and selected it automatically.\n\n"
+           "This commonly happens when a camera ROI was used and the capture software stored "
+           "the full-sensor Bayer pattern instead of the ROI-adjusted pattern. Review the "
+           "selection in the Color step if necessary. Increase Saturation to make pattern "
+           "errors easier to see. The selected pattern will be used for "
+           "preview and export.")
+            .arg(m_source->header().colorName(), suggestedHeader.colorName()));
 }
 
 void MainWindow::loadFrame(std::uint32_t index)
@@ -1457,9 +1538,15 @@ void MainWindow::startExport()
     settings.centerObject = true;
     settings.monochrome = m_exportMonochrome->isChecked();
     settings.binMonochrome = settings.monochrome && m_exportMonoBinning->isChecked();
-    settings.applyCameraWhiteBalance = m_rawExportWhiteBalance->isEnabled()
-        && m_rawExportWhiteBalance->currentData().toBool();
+    const int balanceMode = m_rawExportWhiteBalance->isEnabled()
+        ? m_rawExportWhiteBalance->currentData().toInt() : 0;
+    if (balanceMode == 1 && m_source->hasCameraWhiteBalance())
+        settings.bayerChannelGains = m_source->cameraWhiteBalance();
+    else if (balanceMode == 2)
+        settings.bayerChannelGains = seeingforge::BayerPatternAnalyzer::neutralBalanceGains(
+            m_rawFrame, effectiveColorId(), referenceDetection.objectRect);
     settings.intensityGain = selectedExportIntensityGain();
+    settings.sourceColorId = effectiveColorId();
     settings.detectionThreshold = m_detectionThreshold->value();
     settings.outputSize = outputSize;
     settings.rotationQuarterTurns = m_orientation->currentData().toInt();
@@ -1539,6 +1626,141 @@ void MainWindow::selectWorkflowStep(int row)
         else updateImage();
         if (row == 5) updateExportIntensityDisplay();
     }
+}
+
+void MainWindow::loadUserPreferences()
+{
+    QSettings settings;
+    const auto setComboData = [](QComboBox *combo, const QVariant &value) {
+        const int index = combo->findData(value);
+        if (index >= 0) combo->setCurrentIndex(index);
+    };
+
+    setComboData(m_debayerMethod,
+                 settings.value(QStringLiteral("preferences/colour/debayer"), true));
+    m_whiteBalance->setChecked(
+        settings.value(QStringLiteral("preferences/colour/whiteBalance"), true).toBool());
+    m_redBalance->setValue(
+        settings.value(QStringLiteral("preferences/colour/redBalance"), 100).toInt());
+    m_blueBalance->setValue(
+        settings.value(QStringLiteral("preferences/colour/blueBalance"), 100).toInt());
+    m_saturation->setValue(
+        settings.value(QStringLiteral("preferences/colour/saturation"), 100).toInt());
+    m_hue->setValue(settings.value(QStringLiteral("preferences/colour/hue"), 0).toInt());
+    m_gain->setValue(settings.value(QStringLiteral("preferences/colour/gain"), 100).toInt());
+    m_gamma->setValue(settings.value(QStringLiteral("preferences/colour/gamma"), 100).toInt());
+    m_autoStretch->setChecked(
+        settings.value(QStringLiteral("preferences/colour/autoStretch"), true).toBool());
+
+    setComboData(m_cropMargin,
+                 settings.value(QStringLiteral("preferences/stabilize/cropMargin"), 20));
+    setComboData(m_qualityKeep,
+                 settings.value(QStringLiteral("preferences/quality/keepPercent"), 25));
+    m_rejectClipped->setChecked(
+        settings.value(QStringLiteral("preferences/quality/rejectClipped"), true).toBool());
+    m_maxClippedPercent->setValue(
+        settings.value(QStringLiteral("preferences/quality/maxClippedPercent"), 5).toInt());
+    setComboData(m_qualityOrder,
+                 settings.value(QStringLiteral("preferences/quality/frameOrder"), 0));
+    setComboData(m_exportIntensity,
+                 settings.value(QStringLiteral("preferences/export/intensity"), 1.0));
+}
+
+void MainWindow::savePreferredChoices()
+{
+    QSettings settings;
+    settings.setValue(QStringLiteral("preferences/calibration/sensorBalance"),
+                      m_rawExportWhiteBalance->currentData());
+    settings.setValue(QStringLiteral("preferences/colour/debayer"),
+                      m_debayerMethod->currentData());
+    settings.setValue(QStringLiteral("preferences/colour/whiteBalance"),
+                      m_whiteBalance->isChecked());
+    settings.setValue(QStringLiteral("preferences/colour/redBalance"), m_redBalance->value());
+    settings.setValue(QStringLiteral("preferences/colour/blueBalance"), m_blueBalance->value());
+    settings.setValue(QStringLiteral("preferences/colour/saturation"), m_saturation->value());
+    settings.setValue(QStringLiteral("preferences/colour/hue"), m_hue->value());
+    settings.setValue(QStringLiteral("preferences/colour/gain"), m_gain->value());
+    settings.setValue(QStringLiteral("preferences/colour/gamma"), m_gamma->value());
+    settings.setValue(QStringLiteral("preferences/colour/autoStretch"),
+                      m_autoStretch->isChecked());
+    settings.setValue(QStringLiteral("preferences/stabilize/cropMargin"),
+                      m_cropMargin->currentData());
+    settings.setValue(QStringLiteral("preferences/quality/keepPercent"),
+                      m_qualityKeep->currentData());
+    settings.setValue(QStringLiteral("preferences/quality/rejectClipped"),
+                      m_rejectClipped->isChecked());
+    settings.setValue(QStringLiteral("preferences/quality/maxClippedPercent"),
+                      m_maxClippedPercent->value());
+    settings.setValue(QStringLiteral("preferences/quality/frameOrder"),
+                      m_qualityOrder->currentData());
+    settings.setValue(QStringLiteral("preferences/export/intensity"),
+                      m_exportIntensity->currentData());
+    settings.sync();
+    statusBar()->showMessage(tr("Preferred workflow choices saved."), 4000);
+}
+
+void MainWindow::resetCurrentStep()
+{
+    const int step = m_workflowList ? m_workflowList->currentRow() : -1;
+    QSettings settings;
+    switch (step) {
+    case 1:
+        if (const int index = m_rawExportWhiteBalance->findData(0); index >= 0)
+            m_rawExportWhiteBalance->setCurrentIndex(index);
+        m_hotPixelSamples->setCurrentIndex(m_hotPixelSamples->findData(16));
+        m_hotPixelBrightness->setValue(200);
+        m_hotPixelContrast->setValue(30);
+        m_hotPixelPersistence->setValue(80);
+        m_showHotPixels->setChecked(true);
+        settings.setValue(QStringLiteral("preferences/calibration/sensorBalance"), 0);
+        break;
+    case 2:
+        m_debayerMethod->setCurrentIndex(0);
+        m_whiteBalance->setChecked(true);
+        m_redBalance->setValue(100);
+        m_blueBalance->setValue(100);
+        m_saturation->setValue(100);
+        m_hue->setValue(0);
+        m_gain->setValue(100);
+        m_gamma->setValue(100);
+        m_autoStretch->setChecked(true);
+        settings.remove(QStringLiteral("preferences/colour"));
+        requestPreviewRender();
+        break;
+    case 3:
+        m_orientation->setCurrentIndex(m_orientation->findData(0));
+        m_flipHorizontal->setChecked(false);
+        m_flipVertical->setChecked(false);
+        m_detectionThreshold->setValue(16);
+        if (const int index = m_cropMargin->findData(20); index >= 0)
+            m_cropMargin->setCurrentIndex(index);
+        m_outputSizeMode->setCurrentIndex(0);
+        m_customOutputWidth->setValue(640);
+        m_customOutputHeight->setValue(480);
+        m_showDetection->setChecked(true);
+        settings.setValue(QStringLiteral("preferences/stabilize/cropMargin"), 20);
+        updateDetection();
+        break;
+    case 4:
+        m_qualityKeep->setCurrentIndex(m_qualityKeep->findData(25));
+        m_rejectClipped->setChecked(true);
+        m_maxClippedPercent->setValue(5);
+        m_qualityOrder->setCurrentIndex(m_qualityOrder->findData(0));
+        settings.remove(QStringLiteral("preferences/quality"));
+        updateQualityDisplay();
+        break;
+    case 5:
+        m_exportIntensity->setCurrentIndex(m_exportIntensity->findData(1.0));
+        m_exportMonochrome->setChecked(false);
+        m_exportMonoBinning->setChecked(false);
+        settings.setValue(QStringLiteral("preferences/export/intensity"), 1.0);
+        updateExportIntensityDisplay();
+        break;
+    default:
+        statusBar()->showMessage(tr("This step has no saved user defaults."), 4000);
+        return;
+    }
+    statusBar()->showMessage(tr("Current step reset to defaults."), 4000);
 }
 
 double MainWindow::selectedExportIntensityGain() const
@@ -1743,7 +1965,7 @@ void MainWindow::updateMetadata()
     setMetadataRow(1, tr("Dimensions"), tr("%1 × %2 px").arg(header.width).arg(header.height));
     setMetadataRow(2, tr("Frames"), QString::number(header.frameCount));
     setMetadataRow(3, tr("Pixel depth"), tr("%1-bit").arg(header.pixelDepth));
-    setMetadataRow(4, tr("Colour format"), header.colorName());
+    setMetadataRow(4, tr("Color format"), header.colorName());
     setMetadataRow(5, tr("Identifier"), header.fileId);
     setMetadataRow(6, tr("Observer"), header.observer.isEmpty() ? tr("—") : header.observer);
     setMetadataRow(7, tr("Instrument"), header.instrument.isEmpty() ? tr("—") : header.instrument);
@@ -1760,8 +1982,18 @@ void MainWindow::setMetadataRow(int row, const QString &name, const QString &val
 void MainWindow::showAbout()
 {
     QMessageBox::about(this, tr("About SeeingForge"),
-        tr("<h2>SeeingForge 0.2.1</h2><p>Open-source planetary imaging preparation.</p>"
+        tr("<h2>SeeingForge 0.2.2</h2><p>Open-source planetary imaging preparation.</p>"
            "<p>This build provides guided SER and DSLR RAW sequence processing.</p>"));
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    QSettings settings;
+    settings.setValue(QStringLiteral("window/geometry"), saveGeometry());
+    settings.setValue(QStringLiteral("window/maximized"), isMaximized());
+    settings.setValue(QStringLiteral("window/fullScreen"), isFullScreen());
+    settings.sync();
+    QMainWindow::closeEvent(event);
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event)

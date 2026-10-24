@@ -139,14 +139,14 @@ ExportResult SerExporter::exportFrames(
         ? settings.outputSize.height() : static_cast<int>(source.header().height);
     outputWidth = std::max(2, outputWidth - (outputWidth & 1));
     outputHeight = std::max(2, outputHeight - (outputHeight & 1));
-    const bool bayerSource = source.header().colorId >= 8
-                             && source.header().colorId <= 19;
-    const bool rgbSource = source.header().colorId == 100
-                           || source.header().colorId == 101;
+    const std::uint32_t sourceColorId = settings.sourceColorId != 0
+        ? settings.sourceColorId : source.header().colorId;
+    const bool bayerSource = sourceColorId >= 8 && sourceColorId <= 19;
+    const bool rgbSource = sourceColorId == 100 || sourceColorId == 101;
     const bool convertToMonochrome = settings.monochrome
                                      && (bayerSource || rgbSource);
     const bool binOutput = settings.monochrome && settings.binMonochrome;
-    if (convertToMonochrome && bayerSource && !binOutput && source.header().colorId > 11) {
+    if (convertToMonochrome && bayerSource && !binOutput && sourceColorId > 11) {
         result.error = QStringLiteral("Full-resolution monochrome conversion currently supports RGB Bayer patterns only.");
         return result;
     }
@@ -160,7 +160,7 @@ ExportResult SerExporter::exportFrames(
     if (settings.monochrome) {
         qToLittleEndian<quint32>(0, reinterpret_cast<uchar *>(header.data() + 18));
     } else if (bayerSource) {
-        qToLittleEndian(orientedBayerColorId(source.header().colorId,
+        qToLittleEndian(orientedBayerColorId(sourceColorId,
                                              settings.rotationQuarterTurns,
                                              settings.flipHorizontal,
                                              settings.flipVertical),
@@ -221,18 +221,17 @@ ExportResult SerExporter::exportFrames(
             originY -= originY & 1;
         }
         const double intensityGain = std::clamp(settings.intensityGain, 1.0, 16.0);
-        const bool applyWhiteBalance = settings.applyCameraWhiteBalance && bayerSource
-            && source.hasCameraWhiteBalance();
-        if (intensityGain > 1.0 || applyWhiteBalance) {
-            const auto whiteBalance = source.cameraWhiteBalance();
+        const bool applyChannelGains = bayerSource
+            && settings.bayerChannelGains != std::array<double, 3>{1.0, 1.0, 1.0};
+        if (intensityGain > 1.0 || applyChannelGains) {
             const std::uint32_t maximumSample = source.header().pixelDepth >= 16
                 ? 65535U : (1U << source.header().pixelDepth) - 1U;
             const int planes = source.header().planeCount();
             for (int y = 0; y < sourceHeight; ++y) {
                 for (int x = 0; x < sourceWidth; ++x) {
-                    const double colorGain = applyWhiteBalance
-                        ? whiteBalance[static_cast<std::size_t>(
-                              bayerChannel(x, y, source.header().colorId))]
+                    const double colorGain = applyChannelGains
+                        ? settings.bayerChannelGains[static_cast<std::size_t>(
+                              bayerChannel(x, y, sourceColorId))]
                         : 1.0;
                     for (int plane = 0; plane < planes; ++plane) {
                         const qsizetype sampleOffset =
@@ -296,9 +295,9 @@ ExportResult SerExporter::exportFrames(
         } else if (convertToMonochrome) {
             exportFrame.resize(static_cast<qsizetype>(outputWidth)
                                * outputHeight * bytesPerSample);
-            const bool bgr = source.header().colorId == 101;
+            const bool bgr = sourceColorId == 101;
             auto channelAt = [&](int x, int y) {
-                const int pattern = static_cast<int>(source.header().colorId);
+                const int pattern = static_cast<int>(sourceColorId);
                 const int redX = pattern == 9 || pattern == 11 ? 1 : 0;
                 const int redY = pattern == 10 || pattern == 11 ? 1 : 0;
                 if ((x & 1) == redX && (y & 1) == redY) return 0;

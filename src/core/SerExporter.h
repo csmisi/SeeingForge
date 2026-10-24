@@ -5,6 +5,7 @@
 #include <QVector>
 
 #include <cstdint>
+#include <array>
 #include <functional>
 
 namespace seeingforge {
@@ -25,8 +26,9 @@ struct SerExportSettings {
     bool centerObject = true;
     bool monochrome = false;
     bool binMonochrome = false;
-    bool applyCameraWhiteBalance = false;
+    std::array<double, 3> bayerChannelGains{1.0, 1.0, 1.0};
     double intensityGain = 1.0;
+    std::uint32_t sourceColorId = 0;
     int detectionThreshold = 12;
     QSize outputSize;
     int rotationQuarterTurns = 0;
