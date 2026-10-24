@@ -126,7 +126,18 @@ jobs:
       - name: Ad-hoc sign application bundle
         run: codesign --force --deep --sign - stage/SeeingForge.app
       - name: Package disk image
-        run: hdiutil create -volname SeeingForge -srcfolder stage/SeeingForge.app -ov -format UDZO SeeingForge-${{ github.ref_name }}-macos-intel.dmg
+        shell: bash
+        run: |
+          output="SeeingForge-${{ github.ref_name }}-macos-intel.dmg"
+          for attempt in 1 2 3; do
+            rm -f "$output"
+            if hdiutil create -volname SeeingForge -srcfolder stage/SeeingForge.app -ov -format UDZO "$output"; then
+              exit 0
+            fi
+            hdiutil detach /Volumes/SeeingForge -force || true
+            sleep 10
+          done
+          exit 1
       - uses: actions/upload-artifact@v7.0.2
         with:
           name: seeingforge-macos-intel

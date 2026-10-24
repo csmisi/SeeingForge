@@ -2,9 +2,9 @@
 
 SeeingForge is an open-source desktop application for preparing planetary and lunar SER recordings and DSLR RAW image sequences for stacking.
 
-![SeeingForge on Fedora 44 showing a lunar SER recording and the Calibration workflow](docs/images/seeingforge-lunar-preview.png)
+![SeeingForge on Fedora 44 preparing a Canon CR2 RAW lunar sequence for stabilization and cropping](docs/images/seeingforge-canon-raw-preview.png)
 
-*SeeingForge running on Fedora 44 with a lunar recording and hot-pixel detection controls.*
+*SeeingForge running on Fedora 44 with a 300-frame Canon CR2 RAW lunar sequence, target detection, orientation, and recommended crop preview.*
 
 It grew out of a personal need for a Linux-native workflow inspired by PIPP (Planetary Imaging PreProcessor). With PIPP apparently no longer actively developed, the author could not find a suitable native Linux replacement for their workflow. SeeingForge is an independent project and is not affiliated with PIPP.
 
