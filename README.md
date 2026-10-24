@@ -16,7 +16,7 @@ SeeingForge was built with substantial assistance from OpenAI's Codex AI coding 
 
 **Early experimental software. Only Fedora 44 has been tested.**
 
-The application uses C++20 and Qt 6 and is designed for Linux, Windows, and macOS. It should work on Windows, but Windows compilation and runtime behavior have not yet been tested. macOS is also untested. There are currently no verified Windows or macOS binaries.
+The application uses C++20 and Qt 6 and is designed for Linux, Windows, and macOS. Linux is the primary development platform. Windows packages receive automated build and test coverage and limited hands-on testing. macOS packages receive automated build and test coverage but have not yet been tested on physical Mac hardware.
 
 ## Features
 
@@ -81,7 +81,7 @@ ctest --test-dir build --output-on-failure
 ./build/seeingforge
 ```
 
-On Debian or Ubuntu, install `libraw-dev`; on macOS, install `libraw` with Homebrew. The intended Windows build route is Qt Creator with a matching Qt 6/MSVC desktop kit, CMake, and LibRaw (for example through vcpkg). These routes still require runtime testing.
+On Debian or Ubuntu, install `libraw-dev`; on macOS, install `libraw` with Homebrew. The intended Windows build route is Qt Creator with a matching Qt 6/MSVC desktop kit, CMake, and LibRaw (for example through vcpkg). macOS still requires hands-on runtime testing.
 
 ## Feature requests and contributions
 

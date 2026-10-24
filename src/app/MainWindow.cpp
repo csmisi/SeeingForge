@@ -1760,7 +1760,7 @@ void MainWindow::setMetadataRow(int row, const QString &name, const QString &val
 void MainWindow::showAbout()
 {
     QMessageBox::about(this, tr("About SeeingForge"),
-        tr("<h2>SeeingForge 0.2.0</h2><p>Open-source planetary imaging preparation.</p>"
+        tr("<h2>SeeingForge 0.2.1</h2><p>Open-source planetary imaging preparation.</p>"
            "<p>This build provides guided SER and DSLR RAW sequence processing.</p>"));
 }
 
