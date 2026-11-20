@@ -15,6 +15,11 @@
 namespace seeingforge {
 namespace {
 
+int alignUp(int value, int alignment)
+{
+    return std::max(alignment, ((value + alignment - 1) / alignment) * alignment);
+}
+
 quint16 readSample(const char *bytes, int bytesPerSample, bool bigEndian)
 {
     if (bytesPerSample == 1) return static_cast<uchar>(bytes[0]);
@@ -137,8 +142,6 @@ ExportResult SerExporter::exportFrames(
         ? settings.outputSize.width() : static_cast<int>(source.header().width);
     int outputHeight = settings.outputSize.isValid()
         ? settings.outputSize.height() : static_cast<int>(source.header().height);
-    outputWidth = std::max(2, outputWidth - (outputWidth & 1));
-    outputHeight = std::max(2, outputHeight - (outputHeight & 1));
     const std::uint32_t sourceColorId = settings.sourceColorId != 0
         ? settings.sourceColorId : source.header().colorId;
     const bool bayerSource = sourceColorId >= 8 && sourceColorId <= 19;
@@ -146,6 +149,12 @@ ExportResult SerExporter::exportFrames(
     const bool convertToMonochrome = settings.monochrome
                                      && (bayerSource || rgbSource);
     const bool binOutput = settings.monochrome && settings.binMonochrome;
+    // Keep the dimensions written to the SER header divisible by four. This
+    // avoids row-stride crashes in consumers such as ASIVideoStack. A binned
+    // export needs an eight-pixel-aligned input canvas because it is halved.
+    const int canvasAlignment = binOutput ? 8 : 4;
+    outputWidth = alignUp(outputWidth, canvasAlignment);
+    outputHeight = alignUp(outputHeight, canvasAlignment);
     if (convertToMonochrome && bayerSource && !binOutput && sourceColorId > 11) {
         result.error = QStringLiteral("Full-resolution monochrome conversion currently supports RGB Bayer patterns only.");
         return result;

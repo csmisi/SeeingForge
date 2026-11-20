@@ -53,7 +53,10 @@ static QSize exportCropSize(QSize source, const QRect &object, int margin, QSize
                      object.height() + 2 * qRound(object.height() * margin / 100.0));
     if (requested.isValid()) size = requested;
     size = size.boundedTo(source);
-    return QSize(std::max(2, size.width() & ~1), std::max(2, size.height() & ~1));
+    const auto alignUpToFour = [](int value) {
+        return std::max(4, (value + 3) & ~3);
+    };
+    return QSize(alignUpToFour(size.width()), alignUpToFour(size.height()));
 }
 
 class QualityGraph final : public QWidget {
@@ -732,7 +735,7 @@ QWidget *MainWindow::createStabilizeInspector()
     m_customOutputHeight = new QSpinBox(page);
     for (QSpinBox *box : {m_customOutputWidth, m_customOutputHeight}) {
         box->setRange(2, 16384);
-        box->setSingleStep(2);
+        box->setSingleStep(4);
         box->setEnabled(false);
     }
     m_customOutputWidth->setValue(640);
@@ -750,7 +753,8 @@ QWidget *MainWindow::createStabilizeInspector()
     connect(m_customOutputWidth, &QSpinBox::valueChanged, this, [this] { updateDetection(); });
     connect(m_customOutputHeight, &QSpinBox::valueChanged, this, [this] { updateDetection(); });
     auto *sizeNote = new QLabel(
-        tr("Fixed dimensions add surrounding space when available and never upscale the source."), page);
+        tr("Fixed dimensions add surrounding space when available and never upscale the source. "
+           "Export dimensions are rounded up to multiples of 4."), page);
     sizeNote->setWordWrap(true);
     sizeNote->setStyleSheet(QStringLiteral("color: #aab2bd;"));
     layout->addWidget(sizeNote);
@@ -1982,7 +1986,7 @@ void MainWindow::setMetadataRow(int row, const QString &name, const QString &val
 void MainWindow::showAbout()
 {
     QMessageBox::about(this, tr("About SeeingForge"),
-        tr("<h2>SeeingForge 0.2.2</h2><p>Open-source planetary imaging preparation.</p>"
+        tr("<h2>SeeingForge 0.2.3</h2><p>Open-source planetary imaging preparation.</p>"
            "<p>This build provides guided SER and DSLR RAW sequence processing.</p>"));
 }
 

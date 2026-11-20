@@ -139,6 +139,8 @@ private slots:
     void whiteBalanceIgnoresColouredBackgroundNoise();
     void measuresSharperFrameHigher();
     void exportsSelectedFramesCentered();
+    void padsExportDimensionsToMultiplesOfFour();
+    void padsBinnedExportDimensionsToMultiplesOfFour();
     void appliesExportIntensityGain();
     void exportsRgbAsMonochrome();
     void exportsBayerAsBinnedMonochrome();
@@ -336,6 +338,58 @@ void SerFileTests::exportsSelectedFramesCentered()
     QCOMPARE(qGray(output.readFrame(1).pixel(2, 2)), 220);
 }
 
+void SerFileTests::padsExportDimensionsToMultiplesOfFour()
+{
+    QTemporaryDir directory;
+    const QString inputPath = directory.filePath(QStringLiteral("moving.ser"));
+    QFile input(inputPath);
+    QVERIFY(input.open(QIODevice::WriteOnly));
+    input.write(movingObjectSer());
+    input.close();
+
+    seeingforge::SerFile source;
+    QVERIFY2(source.open(inputPath), qPrintable(source.errorString()));
+    seeingforge::SerExportSettings settings;
+    settings.frameIndices = {0};
+    settings.centerObject = false;
+    settings.outputSize = QSize(6, 6);
+    const QString outputPath = directory.filePath(QStringLiteral("aligned.ser"));
+    const auto result = seeingforge::SerExporter::exportFrames(source, outputPath, settings);
+    QVERIFY2(result.success, qPrintable(result.error));
+
+    seeingforge::SerFile output;
+    QVERIFY2(output.open(outputPath), qPrintable(output.errorString()));
+    QCOMPARE(output.header().width, 8U);
+    QCOMPARE(output.header().height, 8U);
+}
+
+void SerFileTests::padsBinnedExportDimensionsToMultiplesOfFour()
+{
+    QTemporaryDir directory;
+    const QString inputPath = directory.filePath(QStringLiteral("bayer.ser"));
+    QFile input(inputPath);
+    QVERIFY(input.open(QIODevice::WriteOnly));
+    input.write(bayerSer());
+    input.close();
+
+    seeingforge::SerFile source;
+    QVERIFY2(source.open(inputPath), qPrintable(source.errorString()));
+    seeingforge::SerExportSettings settings;
+    settings.frameIndices = {0};
+    settings.centerObject = false;
+    settings.monochrome = true;
+    settings.binMonochrome = true;
+    settings.outputSize = QSize(6, 6);
+    const QString outputPath = directory.filePath(QStringLiteral("aligned-binned.ser"));
+    const auto result = seeingforge::SerExporter::exportFrames(source, outputPath, settings);
+    QVERIFY2(result.success, qPrintable(result.error));
+
+    seeingforge::SerFile output;
+    QVERIFY2(output.open(outputPath), qPrintable(output.errorString()));
+    QCOMPARE(output.header().width, 4U);
+    QCOMPARE(output.header().height, 4U);
+}
+
 void SerFileTests::appliesExportIntensityGain()
 {
     QTemporaryDir directory;
@@ -360,10 +414,12 @@ void SerFileTests::appliesExportIntensityGain()
     seeingforge::SerFile output;
     QVERIFY2(output.open(outputPath), qPrintable(output.errorString()));
     const QImage frame = output.readFrame(0);
-    QCOMPARE(qGray(frame.pixel(0, 0)), 0);
-    QCOMPARE(qGray(frame.pixel(1, 0)), 128);
-    QCOMPARE(qGray(frame.pixel(0, 1)), 255);
-    QCOMPARE(qGray(frame.pixel(1, 1)), 255);
+    QCOMPARE(output.header().width, 4U);
+    QCOMPARE(output.header().height, 4U);
+    QCOMPARE(qGray(frame.pixel(1, 1)), 0);
+    QCOMPARE(qGray(frame.pixel(2, 1)), 128);
+    QCOMPARE(qGray(frame.pixel(1, 2)), 255);
+    QCOMPARE(qGray(frame.pixel(2, 2)), 255);
 }
 
 void SerFileTests::exportsRgbAsMonochrome()
@@ -390,9 +446,9 @@ void SerFileTests::exportsRgbAsMonochrome()
     seeingforge::SerFile output;
     QVERIFY2(output.open(outputPath), qPrintable(output.errorString()));
     QCOMPARE(output.header().colorId, 0U);
-    QCOMPARE(output.header().width, 2U);
-    QCOMPARE(output.header().height, 2U);
-    QCOMPARE(qGray(output.readFrame(0).pixel(0, 0)), 143);
+    QCOMPARE(output.header().width, 4U);
+    QCOMPARE(output.header().height, 4U);
+    QCOMPARE(qGray(output.readFrame(0).pixel(1, 1)), 143);
 }
 
 void SerFileTests::exportsBayerAsBinnedMonochrome()
@@ -431,9 +487,9 @@ void SerFileTests::exportsBayerAsBinnedMonochrome()
     seeingforge::SerFile output;
     QVERIFY2(output.open(outputPath), qPrintable(output.errorString()));
     QCOMPARE(output.header().colorId, 0U);
-    QCOMPARE(output.header().width, 2U);
-    QCOMPARE(output.header().height, 2U);
-    QCOMPARE(qGray(output.readFrame(0).pixel(0, 0)), 100);
+    QCOMPARE(output.header().width, 4U);
+    QCOMPARE(output.header().height, 4U);
+    QCOMPARE(qGray(output.readFrame(0).pixel(1, 1)), 100);
 }
 
 void SerFileTests::rotatesBayerExportAndRemapsPattern()
