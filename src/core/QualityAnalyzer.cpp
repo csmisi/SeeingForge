@@ -7,8 +7,12 @@
 #include <QColor>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <mutex>
 #include <numeric>
+#include <thread>
+#include <vector>
 
 namespace seeingforge {
 namespace {
@@ -48,6 +52,7 @@ FrameQuality QualityAnalyzer::measureFrame(const QImage &frame,
 
     const DetectionResult detection = ObjectDetector::detect(
         frame, backgroundThreshold, 10);
+    result.objectRect = detection.found() ? detection.objectRect : QRect();
     const QRect region = detection.found() ? detection.cropRect : frame.rect();
     const int samplingStep = std::max(1, std::max(region.width(), region.height()) / 400);
     double sum = 0.0;
@@ -98,18 +103,76 @@ QualityResult QualityAnalyzer::analyze(
     const std::function<bool()> &shouldCancel)
 {
     QualityResult result;
+    result.detectionThreshold = backgroundThreshold;
     if (!file.isOpen()) return result;
-    result.frames.reserve(static_cast<qsizetype>(file.header().frameCount));
-    for (std::uint32_t index = 0; index < file.header().frameCount; ++index) {
-        if (shouldCancel && shouldCancel()) {
-            result.canceled = true;
-            return result;
+    const std::uint32_t frameCount = file.header().frameCount;
+    if (frameCount == 0) return result;
+    if (shouldCancel && shouldCancel()) {
+        result.canceled = true;
+        return result;
+    }
+
+    QVector<FrameQuality> measured(static_cast<qsizetype>(frameCount));
+    QVector<quint8> valid(static_cast<qsizetype>(frameCount), 0);
+    std::atomic<std::uint32_t> nextIndex{0};
+    std::atomic<int> completedCount{0};
+    std::atomic_bool canceled{false};
+    std::mutex callbackMutex;
+
+    const unsigned hwThreads = std::thread::hardware_concurrency();
+    const std::size_t workerCount = std::min<std::size_t>(
+        static_cast<std::size_t>(frameCount),
+        std::clamp<std::size_t>(hwThreads == 0 ? 4U : hwThreads, 1U, 6U));
+
+    auto worker = [&] {
+        for (;;) {
+            if (canceled.load()) break;
+            if (shouldCancel) {
+                std::lock_guard<std::mutex> lock(callbackMutex);
+                if (shouldCancel()) {
+                    canceled.store(true);
+                    break;
+                }
+            }
+            const std::uint32_t index = nextIndex.fetch_add(1);
+            if (index >= frameCount) break;
+            const QImage frame = file.readFrame(index);
+            if (!frame.isNull()) {
+                measured[static_cast<qsizetype>(index)] = measureFrame(
+                    frame, index, backgroundThreshold);
+                valid[static_cast<qsizetype>(index)] = 1;
+            }
+            const int done = completedCount.fetch_add(1) + 1;
+            if (progress) {
+                std::lock_guard<std::mutex> lock(callbackMutex);
+                progress(done, static_cast<int>(frameCount));
+            }
         }
-        const QImage frame = file.readFrame(index);
-        if (!frame.isNull())
-            result.frames.append(measureFrame(frame, index, backgroundThreshold));
-        if (progress) progress(static_cast<int>(index + 1U),
-                               static_cast<int>(file.header().frameCount));
+    };
+
+    if (workerCount <= 1) {
+        worker();
+    } else {
+        std::vector<std::thread> threads;
+        threads.reserve(workerCount);
+        for (std::size_t t = 0; t < workerCount; ++t) {
+            threads.emplace_back(worker);
+        }
+        for (auto &thread : threads) {
+            thread.join();
+        }
+    }
+
+    if (canceled.load()) {
+        result.canceled = true;
+        return result;
+    }
+
+    result.frames.reserve(static_cast<qsizetype>(frameCount));
+    for (std::uint32_t index = 0; index < frameCount; ++index) {
+        if (valid[static_cast<qsizetype>(index)] != 0) {
+            result.frames.append(measured[static_cast<qsizetype>(index)]);
+        }
     }
     if (result.frames.isEmpty()) return result;
 

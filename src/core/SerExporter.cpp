@@ -9,8 +9,13 @@
 #include <QtEndian>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 namespace seeingforge {
 namespace {
@@ -201,62 +206,65 @@ ExportResult SerExporter::exportFrames(
     const bool bigEndian = source.header().endianFlag != 0;
     const qsizetype outputFrameBytes = static_cast<qsizetype>(outputWidth)
         * outputHeight * bytesPerPixel;
-    int completedFrames = 0;
-    for (const std::uint32_t index : settings.frameIndices) {
-        if (shouldCancel && shouldCancel()) {
-            result.canceled = true;
-            output.cancelWriting();
-            return result;
+
+    const double intensityGain = std::clamp(settings.intensityGain, 1.0, 16.0);
+    const bool applyChannelGains = bayerSource
+        && settings.bayerChannelGains != std::array<double, 3>{1.0, 1.0, 1.0};
+    const bool applyLut = intensityGain > 1.0 || applyChannelGains;
+    const std::uint32_t maximumSample = source.header().pixelDepth >= 16
+        ? 65535U : (1U << source.header().pixelDepth) - 1U;
+    std::array<QVector<quint16>, 3> channelLuts;
+    if (applyLut) {
+        const int lutSize = bytesPerSample == 1 ? 256 : 65536;
+        const int channelsToBuild = applyChannelGains ? 3 : 1;
+        for (int c = 0; c < channelsToBuild; ++c) {
+            channelLuts[static_cast<std::size_t>(c)].resize(lutSize);
+            const double factor = intensityGain
+                * (applyChannelGains ? settings.bayerChannelGains[static_cast<std::size_t>(c)] : 1.0);
+            for (int v = 0; v < lutSize; ++v) {
+                const long scaled = std::lround(static_cast<double>(v) * factor);
+                const std::uint32_t clamped = scaled <= 0
+                    ? 0U
+                    : std::min<std::uint32_t>(static_cast<std::uint32_t>(scaled), maximumSample);
+                channelLuts[static_cast<std::size_t>(c)][v] = static_cast<quint16>(clamped);
+            }
         }
-        QByteArray frame = source.readRawFrame(index);
+    }
+
+    const int tileCh[2][2] = {
+        {bayerChannel(0, 0, sourceColorId), bayerChannel(1, 0, sourceColorId)},
+        {bayerChannel(0, 1, sourceColorId), bayerChannel(1, 1, sourceColorId)}
+    };
+
+    auto prepareFrame = [&](std::uint32_t index, QByteArray &outFrame, QString &errorOut) -> bool {
+        const QByteArray frame = source.readRawFrame(index);
         if (frame.size() != static_cast<qsizetype>(frameBytes)) {
-            result.error = QStringLiteral("Could not copy source frame %1.").arg(index + 1U);
-            output.cancelWriting();
-            return result;
+            errorOut = QStringLiteral("Could not copy source frame %1.").arg(index + 1U);
+            return false;
         }
         int originX = (sourceWidth - outputWidth) / 2;
         int originY = (sourceHeight - outputHeight) / 2;
         if (settings.centerObject) {
-            const QImage decoded = source.decodeFrame(frame);
-            const DetectionResult detection = ObjectDetector::detect(
-                decoded, settings.detectionThreshold, 0);
-            if (detection.found()) {
-                originX = detection.objectRect.center().x() - outputWidth / 2;
-                originY = detection.objectRect.center().y() - outputHeight / 2;
+            const auto cachedIt = settings.cachedObjectRects.constFind(index);
+            if (cachedIt != settings.cachedObjectRects.constEnd() && cachedIt->isValid()) {
+                const QPoint center = cachedIt->center();
+                originX = center.x() - outputWidth / 2;
+                originY = center.y() - outputHeight / 2;
+            } else {
+                const QImage decoded = source.decodeFrame(frame);
+                const DetectionResult detection = ObjectDetector::detect(
+                    decoded, settings.detectionThreshold, 0);
+                if (detection.found()) {
+                    originX = detection.objectRect.center().x() - outputWidth / 2;
+                    originY = detection.objectRect.center().y() - outputHeight / 2;
+                }
             }
         }
         if (bayerSource) {
             originX -= originX & 1;
             originY -= originY & 1;
         }
-        const double intensityGain = std::clamp(settings.intensityGain, 1.0, 16.0);
-        const bool applyChannelGains = bayerSource
-            && settings.bayerChannelGains != std::array<double, 3>{1.0, 1.0, 1.0};
-        if (intensityGain > 1.0 || applyChannelGains) {
-            const std::uint32_t maximumSample = source.header().pixelDepth >= 16
-                ? 65535U : (1U << source.header().pixelDepth) - 1U;
-            const int planes = source.header().planeCount();
-            for (int y = 0; y < sourceHeight; ++y) {
-                for (int x = 0; x < sourceWidth; ++x) {
-                    const double colorGain = applyChannelGains
-                        ? settings.bayerChannelGains[static_cast<std::size_t>(
-                              bayerChannel(x, y, sourceColorId))]
-                        : 1.0;
-                    for (int plane = 0; plane < planes; ++plane) {
-                        const qsizetype sampleOffset =
-                            ((static_cast<qsizetype>(y) * sourceWidth + x) * planes + plane)
-                            * bytesPerSample;
-                        const quint16 value = readSample(frame.constData() + sampleOffset,
-                                                         bytesPerSample, bigEndian);
-                        const quint16 adjusted = static_cast<quint16>(std::clamp(
-                            static_cast<std::uint32_t>(std::lround(
-                                value * intensityGain * colorGain)), 0U, maximumSample));
-                        writeSample(frame.data() + sampleOffset, adjusted,
-                                    bytesPerSample, bigEndian);
-                    }
-                }
-            }
-        }
+
         QByteArray centered(outputFrameBytes, '\0');
         const int sourceX = std::max(originX, 0);
         const int sourceY = std::max(originY, 0);
@@ -277,7 +285,29 @@ ExportResult SerExporter::exportFrames(
                        + static_cast<qsizetype>(destinationX) * bytesPerPixel);
                 std::memcpy(destinationLine, sourceLine, static_cast<std::size_t>(copyBytes));
             }
+            if (applyLut) {
+                const int planes = source.header().planeCount();
+                for (int row = 0; row < copyHeight; ++row) {
+                    const int dy = destinationY + row;
+                    char *rowPtr = centered.data()
+                        + static_cast<qsizetype>(dy) * destinationStride
+                        + static_cast<qsizetype>(destinationX) * bytesPerPixel;
+                    for (int col = 0; col < copyWidth; ++col) {
+                        const int dx = destinationX + col;
+                        const int cIdx = applyChannelGains ? tileCh[dy & 1][dx & 1] : 0;
+                        const QVector<quint16> &lut = channelLuts[static_cast<std::size_t>(cIdx)];
+                        char *pixelPtr = rowPtr + static_cast<qsizetype>(col) * bytesPerPixel;
+                        for (int plane = 0; plane < planes; ++plane) {
+                            char *samplePtr = pixelPtr + static_cast<qsizetype>(plane) * bytesPerSample;
+                            const quint16 val = readSample(samplePtr, bytesPerSample, bigEndian);
+                            writeSample(samplePtr, lut[static_cast<qsizetype>(val)],
+                                        bytesPerSample, bigEndian);
+                        }
+                    }
+                }
+            }
         }
+
         QByteArray exportFrame;
         if (convertToMonochrome && bayerSource && binOutput) {
             exportFrame.resize(static_cast<qsizetype>(finalWidth)
@@ -378,14 +408,117 @@ ExportResult SerExporter::exportFrames(
                                       settings.rotationQuarterTurns,
                                       settings.flipHorizontal, settings.flipVertical);
         }
-        if (output.write(exportFrame) != exportFrame.size()) {
-            result.error = QStringLiteral("Could not write output frame %1.").arg(index + 1U);
-            output.cancelWriting();
-            return result;
+        outFrame = std::move(exportFrame);
+        return true;
+    };
+
+    const int totalFrames = static_cast<int>(settings.frameIndices.size());
+    const unsigned hwThreads = std::thread::hardware_concurrency();
+    const std::size_t workerCount = totalFrames <= 2
+        ? 1U
+        : std::min<std::size_t>(
+              static_cast<std::size_t>(totalFrames),
+              std::clamp<std::size_t>(hwThreads == 0 ? 4U : hwThreads, 1U, 6U));
+
+    int completedFrames = 0;
+    if (workerCount <= 1) {
+        for (const std::uint32_t index : settings.frameIndices) {
+            if (shouldCancel && shouldCancel()) {
+                result.canceled = true;
+                output.cancelWriting();
+                return result;
+            }
+            QByteArray exportFrame;
+            QString errorOut;
+            if (!prepareFrame(index, exportFrame, errorOut)) {
+                result.error = errorOut;
+                output.cancelWriting();
+                return result;
+            }
+            if (output.write(exportFrame) != exportFrame.size()) {
+                result.error = QStringLiteral("Could not write output frame %1.").arg(index + 1U);
+                output.cancelWriting();
+                return result;
+            }
+            ++completedFrames;
+            if (progress) progress(completedFrames, totalFrames);
         }
-        ++completedFrames;
-        if (progress) progress(completedFrames,
-                               static_cast<int>(settings.frameIndices.size()));
+    } else {
+        const std::size_t batchSize = workerCount * 2U;
+        for (int batchStart = 0; batchStart < totalFrames;
+             batchStart += static_cast<int>(batchSize)) {
+            const int batchLen = std::min(static_cast<int>(batchSize), totalFrames - batchStart);
+            std::vector<QByteArray> batchFrames(static_cast<std::size_t>(batchLen));
+            std::vector<QString> batchErrors(static_cast<std::size_t>(batchLen));
+            std::atomic<int> nextLocal{0};
+            std::atomic_bool stopBatch{false};
+            std::mutex cancelMutex;
+
+            auto worker = [&] {
+                for (;;) {
+                    if (stopBatch.load()) break;
+                    if (shouldCancel) {
+                        std::lock_guard<std::mutex> lock(cancelMutex);
+                        if (shouldCancel()) {
+                            stopBatch.store(true);
+                            break;
+                        }
+                    }
+                    const int localIdx = nextLocal.fetch_add(1);
+                    if (localIdx >= batchLen) break;
+                    const std::uint32_t frameIdx = settings.frameIndices.at(batchStart + localIdx);
+                    QString err;
+                    if (!prepareFrame(frameIdx,
+                                      batchFrames[static_cast<std::size_t>(localIdx)], err)) {
+                        batchErrors[static_cast<std::size_t>(localIdx)] = err;
+                        stopBatch.store(true);
+                        break;
+                    }
+                }
+            };
+
+            const std::size_t threadsInBatch = std::min(
+                workerCount, static_cast<std::size_t>(batchLen));
+            std::vector<std::thread> threads;
+            threads.reserve(threadsInBatch);
+            for (std::size_t t = 0; t < threadsInBatch; ++t) {
+                threads.emplace_back(worker);
+            }
+            for (auto &thread : threads) {
+                thread.join();
+            }
+
+            if (shouldCancel && shouldCancel()) {
+                result.canceled = true;
+                output.cancelWriting();
+                return result;
+            }
+            for (int k = 0; k < batchLen; ++k) {
+                const QString &err = batchErrors[static_cast<std::size_t>(k)];
+                if (!err.isEmpty()) {
+                    result.error = err;
+                    output.cancelWriting();
+                    return result;
+                }
+            }
+            for (int k = 0; k < batchLen; ++k) {
+                if (shouldCancel && shouldCancel()) {
+                    result.canceled = true;
+                    output.cancelWriting();
+                    return result;
+                }
+                const QByteArray &exportFrame = batchFrames[static_cast<std::size_t>(k)];
+                if (output.write(exportFrame) != exportFrame.size()) {
+                    const std::uint32_t frameIdx = settings.frameIndices.at(batchStart + k);
+                    result.error = QStringLiteral("Could not write output frame %1.")
+                                       .arg(frameIdx + 1U);
+                    output.cancelWriting();
+                    return result;
+                }
+                ++completedFrames;
+                if (progress) progress(completedFrames, totalFrames);
+            }
+        }
     }
 
     bool allTimestamps = true;

@@ -1,6 +1,5 @@
 #include "core/PreviewProcessor.h"
 
-#include <QColor>
 #include <QTransform>
 
 #include <algorithm>
@@ -65,20 +64,50 @@ void applyColorAdjustment(QImage &image, double saturationScale, int hueShiftDeg
 {
     if (image.format() != QImage::Format_RGB888
         || (qFuzzyCompare(saturationScale, 1.0) && hueShiftDegrees == 0)) return;
+    const int wrappedShift = (hueShiftDegrees % 360 + 360) % 360;
     for (int y = 0; y < image.height(); ++y) {
         uchar *line = image.scanLine(y);
         for (int x = 0; x < image.width(); ++x) {
             const int byte = x * 3;
-            QColor color(line[byte], line[byte + 1], line[byte + 2]);
-            int hue = 0, saturation = 0, value = 0;
-            color.getHsv(&hue, &saturation, &value);
-            saturation = std::clamp(
-                static_cast<int>(std::lround(saturation * saturationScale)), 0, 255);
-            if (hue >= 0) hue = (hue + hueShiftDegrees % 360 + 360) % 360;
-            color.setHsv(hue, saturation, value);
-            line[byte] = static_cast<uchar>(color.red());
-            line[byte + 1] = static_cast<uchar>(color.green());
-            line[byte + 2] = static_cast<uchar>(color.blue());
+            const int r = line[byte];
+            const int g = line[byte + 1];
+            const int b = line[byte + 2];
+            const int mx = std::max({r, g, b});
+            const int mn = std::min({r, g, b});
+            const int delta = mx - mn;
+            if (delta == 0 || mx == 0) continue;
+            const double s = std::clamp(
+                (static_cast<double>(delta) / static_cast<double>(mx)) * saturationScale,
+                0.0, 1.0);
+            if (s <= 0.0) {
+                line[byte] = static_cast<uchar>(mx);
+                line[byte + 1] = static_cast<uchar>(mx);
+                line[byte + 2] = static_cast<uchar>(mx);
+                continue;
+            }
+            double hue = 0.0;
+            if (mx == r) hue = 60.0 * (static_cast<double>(g - b) / static_cast<double>(delta));
+            else if (mx == g) hue = 60.0 * (2.0 + static_cast<double>(b - r) / static_cast<double>(delta));
+            else hue = 60.0 * (4.0 + static_cast<double>(r - g) / static_cast<double>(delta));
+            hue = std::fmod(hue + static_cast<double>(wrappedShift), 360.0);
+            if (hue < 0.0) hue += 360.0;
+
+            const double hPrime = hue / 60.0;
+            const double c = static_cast<double>(mx) * s;
+            const double xVal = c * (1.0 - std::abs(std::fmod(hPrime, 2.0) - 1.0));
+            const double m = static_cast<double>(mx) - c;
+            double rf = 0.0, gf = 0.0, bf = 0.0;
+            switch (static_cast<int>(std::floor(hPrime)) % 6) {
+            case 0: rf = c; gf = xVal; bf = 0.0; break;
+            case 1: rf = xVal; gf = c; bf = 0.0; break;
+            case 2: rf = 0.0; gf = c; bf = xVal; break;
+            case 3: rf = 0.0; gf = xVal; bf = c; break;
+            case 4: rf = xVal; gf = 0.0; bf = c; break;
+            default: rf = c; gf = 0.0; bf = xVal; break;
+            }
+            line[byte] = static_cast<uchar>(std::clamp(static_cast<int>(std::lround(rf + m)), 0, 255));
+            line[byte + 1] = static_cast<uchar>(std::clamp(static_cast<int>(std::lround(gf + m)), 0, 255));
+            line[byte + 2] = static_cast<uchar>(std::clamp(static_cast<int>(std::lround(bf + m)), 0, 255));
         }
     }
 }
@@ -260,14 +289,18 @@ QImage stretch(const QImage &source)
     }
     if (high <= low + 1) return source;
 
-    QImage output = source.copy();
+    std::array<uchar, 256> lut{};
     const double scale = 255.0 / static_cast<double>(high - low);
+    for (int v = 0; v < 256; ++v) {
+        const int stretched = static_cast<int>((v - low) * scale);
+        lut[static_cast<std::size_t>(v)] = static_cast<uchar>(std::clamp(stretched, 0, 255));
+    }
+    QImage output = source.copy();
     for (int y = 0; y < output.height(); ++y) {
         uchar *line = output.scanLine(y);
         const int count = output.width() * (rgb ? 3 : 1);
         for (int index = 0; index < count; ++index) {
-            const int value = static_cast<int>((static_cast<int>(line[index]) - low) * scale);
-            line[index] = static_cast<uchar>(std::clamp(value, 0, 255));
+            line[index] = lut[static_cast<std::size_t>(line[index])];
         }
     }
     return output;

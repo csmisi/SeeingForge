@@ -153,6 +153,9 @@ private slots:
     void detectsObjectAndAddsCropMargin();
     void detectsPersistentHotPixel();
     void rejectsTruncatedFile();
+    void cachesObjectRectDuringQualityAndReusesInExport();
+    void appliesPostCropGainAndChannelLutWithPadding();
+    void parallelQualityAndExportPreserveOrder();
 };
 
 void SerFileTests::readsHeaderAndFirstFrame()
@@ -688,6 +691,240 @@ void SerFileTests::rejectsTruncatedFile()
     seeingforge::SerFile ser;
     QVERIFY(!ser.open(path));
     QVERIFY(ser.errorString().contains(QStringLiteral("truncated"), Qt::CaseInsensitive));
+}
+
+void SerFileTests::cachesObjectRectDuringQualityAndReusesInExport()
+{
+    QByteArray data = monoSer();
+    data.truncate(static_cast<qsizetype>(seeingforge::SerFile::HeaderSize));
+    constexpr int w = 16;
+    constexpr int h = 16;
+    constexpr int count = 16;
+    qToLittleEndian<quint32>(w, reinterpret_cast<uchar *>(data.data() + 26));
+    qToLittleEndian<quint32>(h, reinterpret_cast<uchar *>(data.data() + 30));
+    qToLittleEndian<quint32>(count, reinterpret_cast<uchar *>(data.data() + 38));
+    for (int f = 0; f < count; ++f) {
+        QByteArray frame(w * h, static_cast<char>(5));
+        const int ox = f % 10;
+        const int oy = (f * 3) % 10;
+        for (int y = oy; y < oy + 4; ++y) {
+            for (int x = ox; x < ox + 4; ++x) {
+                frame[y * w + x] = static_cast<char>(220);
+            }
+        }
+        data.append(frame);
+    }
+    for (int f = 0; f < count; ++f) {
+        appendU64(data, static_cast<quint64>(1000 + f * 100));
+    }
+
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString inputPath = directory.filePath(QStringLiteral("multi-moving.ser"));
+    QFile input(inputPath);
+    QVERIFY(input.open(QIODevice::WriteOnly));
+    QCOMPARE(input.write(data), data.size());
+    input.close();
+
+    seeingforge::SerFile source;
+    QVERIFY2(source.open(inputPath), qPrintable(source.errorString()));
+    const auto quality = seeingforge::QualityAnalyzer::analyze(source, 100);
+    QVERIFY(!quality.canceled);
+    QCOMPARE(quality.frames.size(), count);
+    QCOMPARE(quality.detectionThreshold, 100);
+
+    seeingforge::SerExportSettings cachedSettings;
+    cachedSettings.centerObject = true;
+    cachedSettings.detectionThreshold = 100;
+    cachedSettings.outputSize = QSize(8, 8);
+    for (int f = 0; f < count; ++f) {
+        const auto &fq = quality.frames[f];
+        QCOMPARE(fq.frameIndex, static_cast<std::uint32_t>(f));
+        QVERIFY(fq.objectRect.isValid());
+        const int ox = f % 10;
+        const int oy = (f * 3) % 10;
+        QCOMPARE(fq.objectRect, QRect(ox, oy, 4, 4));
+        cachedSettings.frameIndices.append(fq.frameIndex);
+        cachedSettings.cachedObjectRects.insert(fq.frameIndex, fq.objectRect);
+    }
+
+    seeingforge::SerExportSettings uncachedSettings = cachedSettings;
+    uncachedSettings.cachedObjectRects.clear();
+
+    const QString cachedPath = directory.filePath(QStringLiteral("cached.ser"));
+    const QString uncachedPath = directory.filePath(QStringLiteral("uncached.ser"));
+    const auto resCached = seeingforge::SerExporter::exportFrames(source, cachedPath, cachedSettings);
+    const auto resUncached = seeingforge::SerExporter::exportFrames(source, uncachedPath, uncachedSettings);
+    QVERIFY2(resCached.success, qPrintable(resCached.error));
+    QVERIFY2(resUncached.success, qPrintable(resUncached.error));
+    QVERIFY(resCached.timestampsPreserved);
+
+    seeingforge::SerFile outCached;
+    seeingforge::SerFile outUncached;
+    QVERIFY(outCached.open(cachedPath));
+    QVERIFY(outUncached.open(uncachedPath));
+    QCOMPARE(outCached.header().frameCount, static_cast<std::uint32_t>(count));
+    for (int f = 0; f < count; ++f) {
+        QCOMPARE(outCached.readRawFrame(static_cast<std::uint32_t>(f)),
+                 outUncached.readRawFrame(static_cast<std::uint32_t>(f)));
+        QCOMPARE(outCached.frameTimestamp(static_cast<std::uint32_t>(f)),
+                 static_cast<quint64>(1000 + f * 100));
+        QCOMPARE(qGray(outCached.readFrame(static_cast<std::uint32_t>(f)).pixel(4, 4)), 220);
+    }
+}
+
+void SerFileTests::appliesPostCropGainAndChannelLutWithPadding()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+
+    // Part A: Padded output (8x8 around 4x4 RGGB source) with gain + channel LUT
+    const QString bayerPath = directory.filePath(QStringLiteral("bayer4.ser"));
+    {
+        QFile f(bayerPath);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(bayerSer());
+        f.close();
+    }
+    seeingforge::SerFile bayerSource;
+    QVERIFY(bayerSource.open(bayerPath));
+    seeingforge::SerExportSettings paddedSettings;
+    paddedSettings.frameIndices = {0};
+    paddedSettings.centerObject = false;
+    paddedSettings.outputSize = QSize(8, 8);
+    paddedSettings.intensityGain = 2.0;
+    paddedSettings.bayerChannelGains = {0.25, 0.5, 1.0};
+    const QString paddedOutPath = directory.filePath(QStringLiteral("padded-lut.ser"));
+    const auto paddedRes = seeingforge::SerExporter::exportFrames(
+        bayerSource, paddedOutPath, paddedSettings);
+    QVERIFY2(paddedRes.success, qPrintable(paddedRes.error));
+
+    seeingforge::SerFile paddedOut;
+    QVERIFY(paddedOut.open(paddedOutPath));
+    QCOMPARE(paddedOut.header().width, 8U);
+    QCOMPARE(paddedOut.header().height, 8U);
+    const QByteArray paddedFrame = paddedOut.readRawFrame(0);
+    QCOMPARE(paddedFrame.size(), 64);
+    // Border padding must stay 0
+    QCOMPARE(static_cast<uchar>(paddedFrame[0]), static_cast<uchar>(0));
+    QCOMPARE(static_cast<uchar>(paddedFrame[7 * 8 + 7]), static_cast<uchar>(0));
+    // Source (0,0)=R=200 * 2.0 * 0.25 = 100 at dest (2,2)
+    QCOMPARE(static_cast<uchar>(paddedFrame[2 * 8 + 2]), static_cast<uchar>(100));
+    // Source (1,0)=G=100 * 2.0 * 0.5 = 100 at dest (3,2)
+    QCOMPARE(static_cast<uchar>(paddedFrame[2 * 8 + 3]), static_cast<uchar>(100));
+    // Source (1,1)=B=0 * 2.0 * 1.0 = 0 at dest (3,3)
+    QCOMPARE(static_cast<uchar>(paddedFrame[3 * 8 + 3]), static_cast<uchar>(0));
+
+    // Part B: Cropped sub-region (4x4 from 8x8 RGGB source) with positive even origin
+    QByteArray bigBayer = monoSer();
+    bigBayer.truncate(static_cast<qsizetype>(seeingforge::SerFile::HeaderSize));
+    qToLittleEndian<quint32>(8, reinterpret_cast<uchar *>(bigBayer.data() + 18));
+    qToLittleEndian<quint32>(8, reinterpret_cast<uchar *>(bigBayer.data() + 26));
+    qToLittleEndian<quint32>(8, reinterpret_cast<uchar *>(bigBayer.data() + 30));
+    qToLittleEndian<quint32>(1, reinterpret_cast<uchar *>(bigBayer.data() + 38));
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            const int v = ((y & 1) == 0 && (x & 1) == 0) ? 100
+                        : (((y & 1) != 0 && (x & 1) != 0) ? 80 : 60);
+            bigBayer.append(static_cast<char>(v));
+        }
+    }
+    const QString bigPath = directory.filePath(QStringLiteral("bayer8.ser"));
+    {
+        QFile f(bigPath);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(bigBayer);
+        f.close();
+    }
+    seeingforge::SerFile bigSource;
+    QVERIFY(bigSource.open(bigPath));
+    seeingforge::SerExportSettings cropSettings;
+    cropSettings.frameIndices = {0};
+    cropSettings.centerObject = false;
+    cropSettings.outputSize = QSize(4, 4);
+    cropSettings.intensityGain = 2.0;
+    cropSettings.bayerChannelGains = {0.5, 1.0, 0.25};
+    const QString cropOutPath = directory.filePath(QStringLiteral("cropped-lut.ser"));
+    const auto cropRes = seeingforge::SerExporter::exportFrames(bigSource, cropOutPath, cropSettings);
+    QVERIFY2(cropRes.success, qPrintable(cropRes.error));
+
+    seeingforge::SerFile cropOut;
+    QVERIFY(cropOut.open(cropOutPath));
+    const QByteArray cropFrame = cropOut.readRawFrame(0);
+    QCOMPARE(cropFrame.size(), 16);
+    // (0,0) in cropped 4x4 is R=100 * 2.0 * 0.5 = 100
+    QCOMPARE(static_cast<uchar>(cropFrame[0]), static_cast<uchar>(100));
+    // (1,0) is G=60 * 2.0 * 1.0 = 120
+    QCOMPARE(static_cast<uchar>(cropFrame[1]), static_cast<uchar>(120));
+    // (1,1) is B=80 * 2.0 * 0.25 = 40
+    QCOMPARE(static_cast<uchar>(cropFrame[4 + 1]), static_cast<uchar>(40));
+}
+
+void SerFileTests::parallelQualityAndExportPreserveOrder()
+{
+    QByteArray data = monoSer();
+    data.truncate(static_cast<qsizetype>(seeingforge::SerFile::HeaderSize));
+    constexpr int w = 32;
+    constexpr int h = 32;
+    constexpr int count = 20;
+    qToLittleEndian<quint32>(w, reinterpret_cast<uchar *>(data.data() + 26));
+    qToLittleEndian<quint32>(h, reinterpret_cast<uchar *>(data.data() + 30));
+    qToLittleEndian<quint32>(count, reinterpret_cast<uchar *>(data.data() + 38));
+
+    for (int f = 0; f < count; ++f) {
+        QByteArray frame(w * h, static_cast<char>(4));
+        const int highVal = 120 + (f * 5);
+        const int lowVal = 110 - (f * 4);
+        for (int y = 8; y < 24; ++y) {
+            for (int x = 8; x < 24; ++x) {
+                const bool high = ((x / 2 + y / 2) & 1) != 0;
+                frame[y * w + x] = static_cast<char>(high ? highVal : lowVal);
+            }
+        }
+        data.append(frame);
+    }
+    for (int f = 0; f < count; ++f) {
+        appendU64(data, static_cast<quint64>(5000 + f * 17));
+    }
+
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString inputPath = directory.filePath(QStringLiteral("parallel20.ser"));
+    {
+        QFile f(inputPath);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(data);
+        f.close();
+    }
+
+    seeingforge::SerFile source;
+    QVERIFY(source.open(inputPath));
+    const auto quality = seeingforge::QualityAnalyzer::analyze(source, 20);
+    QVERIFY(!quality.canceled);
+    QCOMPARE(quality.frames.size(), count);
+    for (int f = 0; f < count; ++f) {
+        QCOMPARE(quality.frames[f].frameIndex, static_cast<std::uint32_t>(f));
+    }
+    QCOMPARE(quality.rankedFrameIndices.first(), static_cast<std::uint32_t>(count - 1));
+
+    seeingforge::SerExportSettings settings;
+    settings.frameIndices = quality.rankedFrameIndices;
+    settings.centerObject = true;
+    settings.detectionThreshold = 20;
+    settings.outputSize = QSize(20, 20);
+    const QString outPath = directory.filePath(QStringLiteral("ranked20.ser"));
+    const auto exportRes = seeingforge::SerExporter::exportFrames(source, outPath, settings);
+    QVERIFY2(exportRes.success, qPrintable(exportRes.error));
+    QVERIFY(exportRes.timestampsPreserved);
+
+    seeingforge::SerFile out;
+    QVERIFY(out.open(outPath));
+    QCOMPARE(out.header().frameCount, static_cast<std::uint32_t>(count));
+    for (int i = 0; i < count; ++i) {
+        const std::uint32_t origIdx = quality.rankedFrameIndices[i];
+        QCOMPARE(out.frameTimestamp(static_cast<std::uint32_t>(i)),
+                 static_cast<quint64>(5000 + origIdx * 17));
+    }
 }
 
 QTEST_MAIN(SerFileTests)

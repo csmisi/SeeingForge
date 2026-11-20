@@ -7,7 +7,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
+#include <thread>
+#include <vector>
 
 namespace seeingforge {
 namespace {
@@ -55,21 +58,60 @@ HotPixelResult HotPixelDetector::detect(const FrameSource &file,
         }
     }
     result.initialCandidates = static_cast<int>(candidates.size());
-    QVector<quint8> hits(candidates.size(), 1);
-    result.sampledFrames = 1;
+    QVector<int> hits(candidates.size(), 1);
+    std::atomic<int> sampledFrames{1};
 
-    for (int sample = 1; sample < indices.size(); ++sample) {
-        const QImage frame = file.readFrame(indices[sample]);
-        if (frame.isNull()) continue;
-        ++result.sampledFrames;
-        for (qsizetype candidate = 0; candidate < candidates.size(); ++candidate) {
-            const QPoint point = candidates[candidate];
-            if (isLocalHotPixel(frame, point.x(), point.y(), settings.minimumBrightness,
-                                settings.localContrast)) {
-                ++hits[candidate];
+    const qsizetype remainingSamples = indices.size() - 1;
+    if (remainingSamples > 0) {
+        const unsigned hwThreads = std::thread::hardware_concurrency();
+        const std::size_t workerCount = remainingSamples == 1
+            ? 1U
+            : std::min<std::size_t>(
+                  static_cast<std::size_t>(remainingSamples),
+                  std::clamp<std::size_t>(hwThreads == 0 ? 4U : hwThreads, 1U, 6U));
+        std::vector<std::vector<int>> threadHits(
+            workerCount, std::vector<int>(static_cast<std::size_t>(candidates.size()), 0));
+        std::atomic<qsizetype> nextSample{1};
+
+        auto worker = [&](std::size_t workerIndex) {
+            std::vector<int> &localHits = threadHits[workerIndex];
+            for (;;) {
+                const qsizetype sample = nextSample.fetch_add(1);
+                if (sample >= indices.size()) break;
+                const QImage frame = file.readFrame(indices[sample]);
+                if (frame.isNull()) continue;
+                sampledFrames.fetch_add(1);
+                for (qsizetype candidate = 0; candidate < candidates.size(); ++candidate) {
+                    const QPoint point = candidates[candidate];
+                    if (isLocalHotPixel(frame, point.x(), point.y(), settings.minimumBrightness,
+                                        settings.localContrast)) {
+                        ++localHits[static_cast<std::size_t>(candidate)];
+                    }
+                }
+            }
+        };
+
+        if (workerCount <= 1) {
+            worker(0);
+        } else {
+            std::vector<std::thread> threads;
+            threads.reserve(workerCount);
+            for (std::size_t t = 0; t < workerCount; ++t) {
+                threads.emplace_back(worker, t);
+            }
+            for (auto &thread : threads) {
+                thread.join();
+            }
+        }
+
+        for (const auto &localHits : threadHits) {
+            for (qsizetype candidate = 0; candidate < candidates.size(); ++candidate) {
+                hits[candidate] += localHits[static_cast<std::size_t>(candidate)];
             }
         }
     }
+
+    result.sampledFrames = sampledFrames.load();
 
     const int requiredHits = static_cast<int>(std::ceil(
         result.sampledFrames * std::clamp(settings.persistencePercent, 1, 100) / 100.0));

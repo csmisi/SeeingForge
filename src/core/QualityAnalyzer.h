@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QImage>
+#include <QRect>
 #include <QVector>
 
 #include <cstdint>
@@ -17,11 +18,13 @@ struct FrameQuality {
     double meanBrightness = 0.0;
     double clippedPercent = 0.0;
     double score = 0.0;
+    QRect objectRect;
 };
 
 struct QualityResult {
     QVector<FrameQuality> frames;
     QVector<std::uint32_t> rankedFrameIndices;
+    int detectionThreshold = 12;
     bool canceled = false;
 
     [[nodiscard]] bool isEmpty() const { return frames.isEmpty(); }

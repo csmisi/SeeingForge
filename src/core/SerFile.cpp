@@ -2,10 +2,12 @@
 
 #include <QFile>
 #include <QFileInfo>
+#include <QMutexLocker>
 #include <QtEndian>
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <limits>
 
 namespace seeingforge {
@@ -114,14 +116,15 @@ std::uint64_t SerHeader::bytesPerFrame() const
 bool SerFile::open(const QString &path)
 {
     close();
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        m_error = file.errorString();
+    m_file.setFileName(path);
+    if (!m_file.open(QIODevice::ReadOnly)) {
+        m_error = m_file.errorString();
         return false;
     }
 
-    const QByteArray raw = file.read(static_cast<qint64>(HeaderSize));
+    const QByteArray raw = m_file.read(static_cast<qint64>(HeaderSize));
     if (raw.size() != static_cast<qsizetype>(HeaderSize)) {
+        m_file.close();
         m_error = QStringLiteral("The file is too small to contain a SER header.");
         return false;
     }
@@ -142,6 +145,7 @@ bool SerFile::open(const QString &path)
     candidate.dateTimeUtc = readU64(raw, 170);
 
     if (!candidate.fileId.endsWith(QStringLiteral("RECORDER"), Qt::CaseInsensitive)) {
+        m_file.close();
         m_error = QStringLiteral(
             "The file identifier '%1' is not recognized as a SER recorder identifier.")
                       .arg(candidate.fileId.isEmpty() ? QStringLiteral("(empty)")
@@ -149,14 +153,17 @@ bool SerFile::open(const QString &path)
         return false;
     }
     if (candidate.width == 0 || candidate.height == 0 || candidate.frameCount == 0) {
+        m_file.close();
         m_error = QStringLiteral("The SER header contains invalid image dimensions or frame count.");
         return false;
     }
     if (candidate.pixelDepth == 0 || candidate.pixelDepth > 16) {
+        m_file.close();
         m_error = QStringLiteral("Unsupported SER pixel depth: %1 bits.").arg(candidate.pixelDepth);
         return false;
     }
     if (!isSupportedColor(candidate.colorId)) {
+        m_file.close();
         m_error = QStringLiteral("Unsupported SER colour format: %1.").arg(candidate.colorId);
         return false;
     }
@@ -164,18 +171,36 @@ bool SerFile::open(const QString &path)
     const std::uint64_t frameBytes = candidate.bytesPerFrame();
     if (frameBytes == 0
         || frameBytes > static_cast<std::uint64_t>(std::numeric_limits<qint64>::max())) {
+        m_file.close();
         m_error = QStringLiteral("The SER frame size is not supported.");
         return false;
     }
 
     if (candidate.frameCount > (std::numeric_limits<std::uint64_t>::max() - HeaderSize) / frameBytes) {
+        m_file.close();
         m_error = QStringLiteral("The SER file declares an impossible amount of image data.");
         return false;
     }
     const std::uint64_t requiredSize = HeaderSize + frameBytes * candidate.frameCount;
-    if (requiredSize > static_cast<std::uint64_t>(file.size())) {
+    const std::uint64_t fileSize = static_cast<std::uint64_t>(m_file.size());
+    if (requiredSize > fileSize) {
+        m_file.close();
         m_error = QStringLiteral("The SER file is truncated: its header describes more image data than the file contains.");
         return false;
+    }
+
+    const std::uint64_t trailerBytes = 8ULL * candidate.frameCount;
+    if (fileSize - requiredSize >= trailerBytes
+        && m_file.seek(static_cast<qint64>(requiredSize))) {
+        const QByteArray tsBytes = m_file.read(static_cast<qint64>(trailerBytes));
+        if (tsBytes.size() == static_cast<qsizetype>(trailerBytes)) {
+            m_timestamps.resize(static_cast<qsizetype>(candidate.frameCount));
+            for (std::uint32_t i = 0; i < candidate.frameCount; ++i) {
+                m_timestamps[static_cast<qsizetype>(i)] = qFromLittleEndian<std::uint64_t>(
+                    reinterpret_cast<const uchar *>(tsBytes.constData()
+                                                    + static_cast<qsizetype>(i) * 8));
+            }
+        }
     }
 
     m_path = path;
@@ -187,6 +212,10 @@ bool SerFile::open(const QString &path)
 
 void SerFile::close()
 {
+    QMutexLocker locker(&m_ioMutex);
+    if (m_file.isOpen()) m_file.close();
+    m_file.setFileName(QString());
+    m_timestamps.clear();
     m_path.clear();
     m_header = {};
     m_error.clear();
@@ -211,17 +240,18 @@ QByteArray SerFile::readRawFrame(std::uint32_t index) const
         return {};
     }
 
-    QFile file(m_path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        return {};
+    QMutexLocker locker(&m_ioMutex);
+    if (!m_file.isOpen()) {
+        m_file.setFileName(m_path);
+        if (!m_file.open(QIODevice::ReadOnly)) return {};
     }
 
     const std::uint64_t frameBytes = m_header.bytesPerFrame();
     const std::uint64_t offset = HeaderSize + frameBytes * index;
-    if (!file.seek(static_cast<qint64>(offset))) {
+    if (!m_file.seek(static_cast<qint64>(offset))) {
         return {};
     }
-    const QByteArray frame = file.read(static_cast<qint64>(frameBytes));
+    const QByteArray frame = m_file.read(static_cast<qint64>(frameBytes));
     return frame.size() == static_cast<qsizetype>(frameBytes) ? frame : QByteArray{};
 }
 
@@ -236,14 +266,29 @@ QImage SerFile::decodeFrame(const QByteArray &frame) const
 
     if (m_header.planeCount() == 1) {
         QImage image(width, height, QImage::Format_Grayscale8);
+        if (m_header.pixelDepth <= 8) {
+            const auto rowBytes = static_cast<std::size_t>(width);
+            for (int y = 0; y < height; ++y) {
+                std::memcpy(image.scanLine(y),
+                            frame.constData() + static_cast<qsizetype>(y) * width,
+                            rowBytes);
+            }
+            return image;
+        }
+        const std::uint32_t effectiveDepth = std::min(m_header.pixelDepth, 16U);
+        const std::uint32_t maximum = (1U << effectiveDepth) - 1U;
+        const std::uint32_t halfMax = maximum / 2U;
         for (int y = 0; y < height; ++y) {
             uchar *line = image.scanLine(y);
+            const auto *rowPtr = reinterpret_cast<const uchar *>(
+                frame.constData() + static_cast<qsizetype>(y) * width * 2);
             for (int x = 0; x < width; ++x) {
-                const auto sampleIndex = static_cast<std::uint64_t>(y) * m_header.width
-                                         + static_cast<std::uint64_t>(x);
-                line[x] = static_cast<uchar>(toDisplayValue(
-                    sampleAt(frame, sampleIndex, m_header.pixelDepth, bigEndian),
-                    m_header.pixelDepth));
+                const auto *samplePtr = rowPtr + static_cast<qsizetype>(x) * 2;
+                const std::uint16_t val = bigEndian
+                    ? qFromBigEndian<std::uint16_t>(samplePtr)
+                    : qFromLittleEndian<std::uint16_t>(samplePtr);
+                line[x] = static_cast<uchar>(
+                    (static_cast<std::uint32_t>(val) * 255U + halfMax) / maximum);
             }
         }
         return image;
@@ -274,16 +319,8 @@ QImage SerFile::decodeFrame(const QByteArray &frame) const
 
 std::uint64_t SerFile::frameTimestamp(std::uint32_t index) const
 {
-    if (!m_isOpen || index >= m_header.frameCount) return 0;
-    QFile file(m_path);
-    if (!file.open(QIODevice::ReadOnly)) return 0;
-    const std::uint64_t offset = HeaderSize + m_header.bytesPerFrame() * m_header.frameCount
-                                 + 8U * index;
-    if (offset + 8U > static_cast<std::uint64_t>(file.size())
-        || !file.seek(static_cast<qint64>(offset))) return 0;
-    const QByteArray bytes = file.read(8);
-    if (bytes.size() != 8) return 0;
-    return qFromLittleEndian<std::uint64_t>(reinterpret_cast<const uchar *>(bytes.constData()));
+    if (!m_isOpen || index >= static_cast<std::uint32_t>(m_timestamps.size())) return 0;
+    return m_timestamps.at(static_cast<qsizetype>(index));
 }
 
 } // namespace seeingforge

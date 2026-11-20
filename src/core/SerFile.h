@@ -2,9 +2,12 @@
 
 #include "core/FrameSource.h"
 
-#include <QImage>
 #include <QByteArray>
+#include <QFile>
+#include <QImage>
+#include <QMutex>
 #include <QString>
+#include <QVector>
 
 #include <cstdint>
 
@@ -53,6 +56,9 @@ private:
     QString m_path;
     SerHeader m_header;
     QString m_error;
+    mutable QFile m_file;
+    mutable QMutex m_ioMutex;
+    QVector<std::uint64_t> m_timestamps;
     bool m_isOpen = false;
 };
 

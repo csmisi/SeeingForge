@@ -1,5 +1,7 @@
 #pragma once
 
+#include <QHash>
+#include <QRect>
 #include <QString>
 #include <QSize>
 #include <QVector>
@@ -34,6 +36,7 @@ struct SerExportSettings {
     int rotationQuarterTurns = 0;
     bool flipHorizontal = false;
     bool flipVertical = false;
+    QHash<std::uint32_t, QRect> cachedObjectRects;
 };
 
 class SerExporter {

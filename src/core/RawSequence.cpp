@@ -7,7 +7,12 @@
 #include <libraw/libraw.h>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <limits>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 namespace seeingforge {
 namespace {
@@ -74,6 +79,94 @@ bool inspect(const QString &path, SerHeader &header, std::uint64_t &timestamp,
     return header.width > 0 && header.height > 0;
 }
 
+struct InspectOutcome {
+    bool ok = false;
+    SerHeader header;
+    std::uint64_t timestamp = 0;
+    std::array<double, 3> whiteBalance{1.0, 1.0, 1.0};
+    QString error;
+};
+
+template <typename PixelValue, typename MakeLut, typename EmitRow>
+bool decodeRawWithLut(const QString &path, int &outWidth, int &outHeight,
+                      MakeLut &&makeLut, EmitRow &&emitRow)
+{
+    LibRaw raw;
+    const QByteArray encoded = QFile::encodeName(path);
+    if (raw.open_file(encoded.constData()) != LIBRAW_SUCCESS
+        || raw.unpack() != LIBRAW_SUCCESS) {
+        return false;
+    }
+
+    const int width = raw.imgdata.sizes.width;
+    const int height = raw.imgdata.sizes.height;
+    const int left = raw.imgdata.sizes.left_margin;
+    const int top = raw.imgdata.sizes.top_margin;
+    if (width <= 0 || height <= 0) return false;
+    outWidth = width;
+    outHeight = height;
+
+    int ch[2][2]{};
+    for (int dy = 0; dy < 2; ++dy) {
+        for (int dx = 0; dx < 2; ++dx) {
+            ch[dy][dx] = raw.COLOR(top + dy, left + dx);
+        }
+    }
+
+    const bool canDirectRaw = raw.imgdata.rawdata.raw_image != nullptr
+        && raw.imgdata.color.cblack[4] == 0
+        && raw.imgdata.color.cblack[5] == 0
+        && raw.imgdata.rawdata.ph1_cblack == nullptr
+        && raw.imgdata.sizes.mask[0][2] == 0
+        && raw.imgdata.sizes.mask[0][3] == 0
+        && (raw.imgdata.sizes.raw_pitch == 0
+            || raw.imgdata.sizes.raw_pitch
+                   == static_cast<unsigned>(raw.imgdata.sizes.raw_width) * 2U)
+        && left + width <= static_cast<int>(raw.imgdata.sizes.raw_width)
+        && top + height <= static_cast<int>(raw.imgdata.sizes.raw_height);
+
+    if (canDirectRaw) {
+        std::array<std::uint32_t, 4> blackLevels{};
+        std::uint32_t minBlack = std::numeric_limits<std::uint32_t>::max();
+        for (std::size_t i = 0; i < 4; ++i) {
+            blackLevels[i] = raw.imgdata.color.black + raw.imgdata.color.cblack[i];
+            minBlack = std::min(minBlack, blackLevels[i]);
+        }
+        const std::uint32_t effectiveMax = std::max(
+            1U, raw.imgdata.color.maximum > minBlack
+                    ? raw.imgdata.color.maximum - minBlack
+                    : raw.imgdata.color.maximum);
+        const std::vector<PixelValue> lut = makeLut(effectiveMax);
+        const ushort *rawImage = raw.imgdata.rawdata.raw_image;
+        const int rawWidth = raw.imgdata.sizes.raw_width;
+        for (int y = 0; y < height; ++y) {
+            const ushort *srcRow = rawImage + static_cast<qsizetype>(top + y) * rawWidth + left;
+            const int *rowCh = ch[y & 1];
+            emitRow(y, width, [&](int x) -> PixelValue {
+                const std::uint32_t rawVal = srcRow[x];
+                const std::uint32_t blk = blackLevels[static_cast<std::size_t>(rowCh[x & 1])];
+                const std::uint32_t sub = rawVal > blk ? rawVal - blk : 0U;
+                return lut[static_cast<std::size_t>(sub)];
+            });
+        }
+        return true;
+    }
+
+    if (raw.raw2image_ex(1) != LIBRAW_SUCCESS || !raw.imgdata.image) return false;
+    const std::uint32_t effectiveMax = std::max(1U, raw.imgdata.color.maximum);
+    const std::vector<PixelValue> lut = makeLut(effectiveMax);
+    const int iwidth = raw.imgdata.sizes.iwidth;
+    for (int y = 0; y < height; ++y) {
+        const auto *srcRow = raw.imgdata.image + static_cast<qsizetype>(y) * iwidth;
+        const int *rowCh = ch[y & 1];
+        emitRow(y, width, [&](int x) -> PixelValue {
+            const std::uint16_t val = srcRow[x][rowCh[x & 1]];
+            return lut[static_cast<std::size_t>(val)];
+        });
+    }
+    return true;
+}
+
 } // namespace
 
 bool RawSequence::open(const QStringList &paths,
@@ -86,41 +179,98 @@ bool RawSequence::open(const QStringList &paths,
         m_error = QStringLiteral("No RAW files were selected.");
         return false;
     }
-    SerHeader reference;
-    int completed = 0;
-    for (const QString &path : paths) {
-        if (shouldCancel && shouldCancel()) {
-            m_error = QStringLiteral("RAW sequence loading was canceled.");
-            close();
-            return false;
+    if (shouldCancel && shouldCancel()) {
+        m_error = QStringLiteral("RAW sequence loading was canceled.");
+        return false;
+    }
+
+    const std::size_t total = static_cast<std::size_t>(paths.size());
+    std::vector<InspectOutcome> outcomes(total);
+    std::atomic<std::size_t> nextIndex{0};
+    std::atomic_bool stop{false};
+    std::atomic<int> completedCount{0};
+    std::mutex callbackMutex;
+
+    const unsigned hwThreads = std::thread::hardware_concurrency();
+    const std::size_t workerCount = std::min<std::size_t>(
+        total, std::clamp<std::size_t>(hwThreads == 0 ? 4U : hwThreads, 1U, 8U));
+
+    auto worker = [&] {
+        for (;;) {
+            if (stop.load()) break;
+            if (shouldCancel) {
+                std::lock_guard<std::mutex> lock(callbackMutex);
+                if (shouldCancel()) {
+                    stop.store(true);
+                    break;
+                }
+            }
+            const std::size_t idx = nextIndex.fetch_add(1);
+            if (idx >= total) break;
+            InspectOutcome outcome;
+            outcome.ok = inspect(paths.at(static_cast<qsizetype>(idx)),
+                                 outcome.header, outcome.timestamp,
+                                 outcome.whiteBalance, outcome.error);
+            if (!outcome.ok) {
+                outcomes[idx] = std::move(outcome);
+                stop.store(true);
+                break;
+            }
+            outcomes[idx] = std::move(outcome);
+            const int done = completedCount.fetch_add(1) + 1;
+            if (progress) {
+                std::lock_guard<std::mutex> lock(callbackMutex);
+                progress(done, static_cast<int>(total));
+            }
         }
-        SerHeader candidate;
-        std::uint64_t timestamp = 0;
-        std::array<double, 3> whiteBalance{1.0, 1.0, 1.0};
-        QString error;
-        if (!inspect(path, candidate, timestamp, whiteBalance, error)) {
-            m_error = QStringLiteral("%1: %2").arg(QFileInfo(path).fileName(), error);
+    };
+
+    if (workerCount <= 1) {
+        worker();
+    } else {
+        std::vector<std::thread> threads;
+        threads.reserve(workerCount);
+        for (std::size_t t = 0; t < workerCount; ++t) {
+            threads.emplace_back(worker);
+        }
+        for (auto &thread : threads) {
+            thread.join();
+        }
+    }
+
+    if (shouldCancel && shouldCancel()) {
+        m_error = QStringLiteral("RAW sequence loading was canceled.");
+        close();
+        return false;
+    }
+
+    SerHeader reference;
+    for (std::size_t i = 0; i < total; ++i) {
+        const QString &path = paths.at(static_cast<qsizetype>(i));
+        const InspectOutcome &outcome = outcomes[i];
+        if (!outcome.ok) {
+            m_error = QStringLiteral("%1: %2").arg(QFileInfo(path).fileName(), outcome.error);
             close();
             return false;
         }
         if (!m_paths.isEmpty()
-            && (candidate.width != reference.width || candidate.height != reference.height
-                || candidate.colorId != reference.colorId
-                || candidate.instrument != reference.instrument)) {
+            && (outcome.header.width != reference.width
+                || outcome.header.height != reference.height
+                || outcome.header.colorId != reference.colorId
+                || outcome.header.instrument != reference.instrument)) {
             m_error = QStringLiteral("%1 is not compatible with the first frame (camera, dimensions, or Bayer pattern differ).")
                           .arg(QFileInfo(path).fileName());
             close();
             return false;
         }
         if (m_paths.isEmpty()) {
-            reference = candidate;
-            m_cameraWhiteBalance = whiteBalance;
+            reference = outcome.header;
+            m_cameraWhiteBalance = outcome.whiteBalance;
         }
         m_paths.append(QFileInfo(path).absoluteFilePath());
-        m_timestamps.append(timestamp);
-        ++completed;
-        if (progress) progress(completed, static_cast<int>(paths.size()));
+        m_timestamps.append(outcome.timestamp);
     }
+
     m_header = reference;
     m_header.frameCount = static_cast<std::uint32_t>(m_paths.size());
     m_header.dateTimeUtc = m_timestamps.isEmpty() ? 0 : m_timestamps.constFirst();
@@ -153,31 +303,31 @@ const QStringList &RawSequence::files() const { return m_paths; }
 QByteArray RawSequence::readRawFrame(std::uint32_t index) const
 {
     if (index >= static_cast<std::uint32_t>(m_paths.size())) return {};
-    LibRaw raw;
-    const QByteArray encoded = QFile::encodeName(m_paths.at(static_cast<qsizetype>(index)));
-    int status = raw.open_file(encoded.constData());
-    if (status != LIBRAW_SUCCESS || raw.unpack() != LIBRAW_SUCCESS
-        || raw.raw2image() != LIBRAW_SUCCESS
-        || raw.subtract_black() != LIBRAW_SUCCESS || !raw.imgdata.image) return {};
-
-    const int width = raw.imgdata.sizes.width;
-    const int height = raw.imgdata.sizes.height;
-    const int left = raw.imgdata.sizes.left_margin;
-    const int top = raw.imgdata.sizes.top_margin;
-    const std::uint32_t maximum = std::max(1U, raw.imgdata.color.maximum);
-    QByteArray output(static_cast<qsizetype>(width) * height * 2, '\0');
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const int channel = raw.COLOR(y + top, x + left);
-            const std::uint32_t value = raw.imgdata.image[
-                static_cast<qsizetype>(y) * raw.imgdata.sizes.iwidth + x][channel];
-            const quint16 normalized = static_cast<quint16>(std::min<std::uint64_t>(
-                65535U, (static_cast<std::uint64_t>(value) * 65535U + maximum / 2U) / maximum));
-            qToLittleEndian(normalized, reinterpret_cast<uchar *>(
-                output.data() + (static_cast<qsizetype>(y) * width + x) * 2));
+    int width = 0;
+    int height = 0;
+    QByteArray output;
+    const auto makeLut16 = [](std::uint32_t maximum) {
+        std::vector<quint16> lut(65536U);
+        const std::uint32_t halfMax = maximum / 2U;
+        for (std::uint32_t v = 0; v < 65536U; ++v) {
+            lut[v] = static_cast<quint16>(std::min<std::uint64_t>(
+                65535U, (static_cast<std::uint64_t>(v) * 65535U + halfMax) / maximum));
         }
-    }
-    return output;
+        return lut;
+    };
+    const bool ok = decodeRawWithLut<quint16>(
+        m_paths.at(static_cast<qsizetype>(index)), width, height, makeLut16,
+        [&](int y, int w, const auto &readPixel) {
+            if (output.isEmpty()) {
+                output.resize(static_cast<qsizetype>(w) * height * 2);
+            }
+            auto *dst = reinterpret_cast<uchar *>(output.data())
+                        + static_cast<qsizetype>(y) * w * 2;
+            for (int x = 0; x < w; ++x) {
+                qToLittleEndian(readPixel(x), dst + static_cast<qsizetype>(x) * 2);
+            }
+        });
+    return ok ? output : QByteArray{};
 }
 
 QImage RawSequence::decodeFrame(const QByteArray &rawFrame) const
@@ -188,16 +338,45 @@ QImage RawSequence::decodeFrame(const QByteArray &rawFrame) const
     QImage image(width, height, QImage::Format_Grayscale8);
     for (int y = 0; y < height; ++y) {
         uchar *line = image.scanLine(y);
+        const auto *rowPtr = reinterpret_cast<const uchar *>(
+            rawFrame.constData() + static_cast<qsizetype>(y) * width * 2);
         for (int x = 0; x < width; ++x) {
-            const auto *sample = reinterpret_cast<const uchar *>(
-                rawFrame.constData() + (static_cast<qsizetype>(y) * width + x) * 2);
-            line[x] = static_cast<uchar>((qFromLittleEndian<quint16>(sample) + 128U) / 257U);
+            line[x] = static_cast<uchar>(
+                (qFromLittleEndian<quint16>(rowPtr + static_cast<qsizetype>(x) * 2) + 128U) / 257U);
         }
     }
     return image;
 }
 
-QImage RawSequence::readFrame(std::uint32_t index) const { return decodeFrame(readRawFrame(index)); }
+QImage RawSequence::readFrame(std::uint32_t index) const
+{
+    if (index >= static_cast<std::uint32_t>(m_paths.size())) return {};
+    int width = 0;
+    int height = 0;
+    QImage image;
+    const auto makeLut8 = [](std::uint32_t maximum) {
+        std::vector<uchar> lut(65536U);
+        const std::uint32_t halfMax = maximum / 2U;
+        for (std::uint32_t v = 0; v < 65536U; ++v) {
+            const std::uint32_t norm16 = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+                65535U, (static_cast<std::uint64_t>(v) * 65535U + halfMax) / maximum));
+            lut[v] = static_cast<uchar>((norm16 + 128U) / 257U);
+        }
+        return lut;
+    };
+    const bool ok = decodeRawWithLut<uchar>(
+        m_paths.at(static_cast<qsizetype>(index)), width, height, makeLut8,
+        [&](int y, int w, const auto &readPixel) {
+            if (image.isNull()) {
+                image = QImage(w, height, QImage::Format_Grayscale8);
+            }
+            uchar *line = image.scanLine(y);
+            for (int x = 0; x < w; ++x) {
+                line[x] = readPixel(x);
+            }
+        });
+    return ok ? image : QImage{};
+}
 std::uint64_t RawSequence::frameTimestamp(std::uint32_t index) const
 {
     return index < static_cast<std::uint32_t>(m_timestamps.size())
