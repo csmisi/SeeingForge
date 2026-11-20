@@ -183,7 +183,7 @@ QualityResult QualityAnalyzer::analyze(
     }
     const double medianBrightness = percentile(brightness, 0.50);
 
-    QVector<double> scoreByIndex(static_cast<qsizetype>(file.header().frameCount), 0.0);
+    QVector<double> rawScoreByIndex(static_cast<qsizetype>(file.header().frameCount), 0.0);
     QVector<double> rawScores;
     rawScores.reserve(result.frames.size());
     for (auto &frame : result.frames) {
@@ -194,6 +194,7 @@ QualityResult QualityAnalyzer::analyze(
         frame.score = std::log1p(frame.sharpness * 1000.0)
                       + 0.20 * std::log1p(frame.contrast * 10.0)
                       + 0.05 * exposureConsistency - 0.15 * clippingPenalty;
+        rawScoreByIndex[static_cast<qsizetype>(frame.frameIndex)] = frame.score;
         rawScores.append(frame.score);
     }
     const double scoreLow = percentile(rawScores, 0.02);
@@ -201,13 +202,12 @@ QualityResult QualityAnalyzer::analyze(
     for (auto &frame : result.frames) {
         frame.score = 100.0 * normalize(frame.score, scoreLow, scoreHigh);
         result.rankedFrameIndices.append(frame.frameIndex);
-        scoreByIndex[static_cast<qsizetype>(frame.frameIndex)] = frame.score;
     }
-    std::sort(result.rankedFrameIndices.begin(), result.rankedFrameIndices.end(),
-              [&scoreByIndex](std::uint32_t left, std::uint32_t right) {
-                  return scoreByIndex[static_cast<qsizetype>(left)]
-                         > scoreByIndex[static_cast<qsizetype>(right)];
-              });
+    std::stable_sort(result.rankedFrameIndices.begin(), result.rankedFrameIndices.end(),
+                     [&rawScoreByIndex](std::uint32_t left, std::uint32_t right) {
+                         return rawScoreByIndex[static_cast<qsizetype>(left)]
+                                > rawScoreByIndex[static_cast<qsizetype>(right)];
+                     });
     return result;
 }
 

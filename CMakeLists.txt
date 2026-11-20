@@ -62,7 +62,7 @@ include(CTest)
 if(BUILD_TESTING)
     add_executable(serfile_tests tests/SerFileTests.cpp)
     target_link_libraries(serfile_tests PRIVATE seeingforge_core Qt6::Test)
-    add_test(NAME serfile_tests COMMAND serfile_tests)
+    add_test(NAME serfile_tests COMMAND serfile_tests -o -,txt)
     set_tests_properties(serfile_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
 

@@ -482,6 +482,7 @@ void SerFileTests::exportsBayerAsBinnedMonochrome()
     for (int y = 0; y < 4; ++y)
         for (int x = 0; x < 4; ++x)
             QCOMPARE(qGray(fullOutput.readFrame(0).pixel(x, y)), 114);
+    fullOutput.close();
     settings.binMonochrome = true;
     const auto exportResult = seeingforge::SerExporter::exportFrames(
         source, outputPath, settings);
