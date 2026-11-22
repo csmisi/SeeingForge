@@ -17,6 +17,9 @@ struct FrameQuality {
     double contrast = 0.0;
     double meanBrightness = 0.0;
     double clippedPercent = 0.0;
+    double foregroundArea = 0.0;
+    double totalFlux = 0.0;
+    double targetCoverage = 1.0;
     double score = 0.0;
     QRect objectRect;
 };
@@ -34,11 +37,13 @@ class QualityAnalyzer {
 public:
     [[nodiscard]] static FrameQuality measureFrame(const QImage &frame,
                                                    std::uint32_t frameIndex,
-                                                   int backgroundThreshold = 12);
+                                                   int backgroundThreshold = 12,
+                                                   bool bayerMosaic = false);
     [[nodiscard]] static QualityResult analyze(const FrameSource &file,
         int backgroundThreshold = 12,
         const std::function<void(int, int)> &progress = {},
-        const std::function<bool()> &shouldCancel = {});
+        const std::function<bool()> &shouldCancel = {},
+        std::uint32_t effectiveColorId = 0);
 };
 
 } // namespace seeingforge

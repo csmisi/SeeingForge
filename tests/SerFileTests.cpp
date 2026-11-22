@@ -1,3 +1,4 @@
+#include "core/AviFile.h"
 #include "core/SerFile.h"
 #include "core/PreviewProcessor.h"
 #include "core/ObjectDetector.h"
@@ -11,6 +12,9 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QtEndian>
+
+#include <algorithm>
+#include <cstring>
 
 namespace {
 
@@ -26,6 +30,166 @@ void appendU64(QByteArray &data, quint64 value)
     const qsizetype offset = data.size();
     data.resize(offset + 8);
     qToLittleEndian(value, reinterpret_cast<uchar *>(data.data() + offset));
+}
+
+void appendChunk(QByteArray &data, const char id[4], const QByteArray &payload)
+{
+    data.append(id, 4);
+    appendU32(data, static_cast<quint32>(payload.size()));
+    data.append(payload);
+    if ((payload.size() & 1) != 0) {
+        data.append('\0');
+    }
+}
+
+void appendList(QByteArray &data, const char listType[4], const QByteArray &body)
+{
+    data.append("LIST", 4);
+    appendU32(data, static_cast<quint32>(body.size() + 4));
+    data.append(listType, 4);
+    data.append(body);
+    if ((body.size() & 1) != 0) {
+        data.append('\0');
+    }
+}
+
+QByteArray buildAviHeaderChunk(quint32 usPerFrame, quint32 totalFrames, quint32 width, quint32 height)
+{
+    QByteArray avih(56, '\0');
+    qToLittleEndian<quint32>(usPerFrame, reinterpret_cast<uchar *>(avih.data() + 0));
+    qToLittleEndian<quint32>(0x810U, reinterpret_cast<uchar *>(avih.data() + 12));
+    qToLittleEndian<quint32>(totalFrames, reinterpret_cast<uchar *>(avih.data() + 16));
+    qToLittleEndian<quint32>(1U, reinterpret_cast<uchar *>(avih.data() + 24));
+    qToLittleEndian<quint32>(width, reinterpret_cast<uchar *>(avih.data() + 32));
+    qToLittleEndian<quint32>(height, reinterpret_cast<uchar *>(avih.data() + 36));
+    return avih;
+}
+
+QByteArray buildStrhChunk(const char handler[4], quint32 scale, quint32 rate, quint32 length)
+{
+    QByteArray strh(56, '\0');
+    std::copy_n("vids", 4, strh.data());
+    std::copy_n(handler, 4, strh.data() + 4);
+    qToLittleEndian<quint32>(scale, reinterpret_cast<uchar *>(strh.data() + 20));
+    qToLittleEndian<quint32>(rate, reinterpret_cast<uchar *>(strh.data() + 24));
+    qToLittleEndian<quint32>(length, reinterpret_cast<uchar *>(strh.data() + 32));
+    return strh;
+}
+
+QByteArray buildStrfChunk(qint32 width, qint32 heightSigned, quint16 bitCount,
+                          const char compression[4], quint32 sizeImage)
+{
+    QByteArray strf(40, '\0');
+    qToLittleEndian<quint32>(40U, reinterpret_cast<uchar *>(strf.data() + 0));
+    qToLittleEndian<qint32>(width, reinterpret_cast<uchar *>(strf.data() + 4));
+    qToLittleEndian<qint32>(heightSigned, reinterpret_cast<uchar *>(strf.data() + 8));
+    qToLittleEndian<quint16>(1U, reinterpret_cast<uchar *>(strf.data() + 12));
+    qToLittleEndian<quint16>(bitCount, reinterpret_cast<uchar *>(strf.data() + 14));
+    std::copy_n(compression, 4, strf.data() + 16);
+    qToLittleEndian<quint32>(sizeImage, reinterpret_cast<uchar *>(strf.data() + 20));
+    return strf;
+}
+
+QByteArray makeSeeStarStyleAvi(int width, int height, const QVector<QByteArray> &frames)
+{
+    const quint32 count = static_cast<quint32>(frames.size());
+    const quint32 frameSize = static_cast<quint32>(frames.constFirst().size());
+
+    // Build placeholder indx (1 super-index entry)
+    const int indxSize = 24 + 16;
+    QByteArray indx(indxSize, '\0');
+    qToLittleEndian<quint16>(4U, reinterpret_cast<uchar *>(indx.data() + 0));
+    indx[2] = 0; // bIndexSubType
+    indx[3] = 0; // bIndexType = AVI_INDEX_OF_INDEXES
+    qToLittleEndian<quint32>(1U, reinterpret_cast<uchar *>(indx.data() + 4));
+    std::copy_n("00db", 4, indx.data() + 8);
+
+    QByteArray strlBody;
+    appendChunk(strlBody, "strh", buildStrhChunk("DIB ", 684896U, 10000000U, count));
+    appendChunk(strlBody, "strf", buildStrfChunk(width, -height, 8U, "\0\0\0\0", frameSize));
+    const qsizetype indxPayloadRelInStrl = strlBody.size() + 8;
+    appendChunk(strlBody, "indx", indx);
+
+    QByteArray dmlh(248, '\0');
+    qToLittleEndian<quint32>(count, reinterpret_cast<uchar *>(dmlh.data()));
+    QByteArray odmlBody;
+    appendChunk(odmlBody, "dmlh", dmlh);
+
+    QByteArray hdrlBody;
+    appendChunk(hdrlBody, "avih", buildAviHeaderChunk(68489U, count, static_cast<quint32>(width), static_cast<quint32>(height)));
+    const qsizetype strlOffsetInHdrl = hdrlBody.size();
+    appendList(hdrlBody, "strl", strlBody);
+    appendList(hdrlBody, "odml", odmlBody);
+
+    QByteArray aviBody;
+    const qsizetype hdrlOffsetInAvi = aviBody.size();
+    appendList(aviBody, "hdrl", hdrlBody);
+    const qsizetype indxPayloadOffsetInFile = 12 + hdrlOffsetInAvi + 12 + strlOffsetInHdrl + 12 + indxPayloadRelInStrl;
+
+    // Build movi with ix00 + 00db + JUNK chunks
+    const int ixSize = 24 + static_cast<int>(count) * 8;
+    QByteArray ix00(ixSize, '\0');
+    qToLittleEndian<quint16>(2U, reinterpret_cast<uchar *>(ix00.data() + 0));
+    ix00[2] = 0;
+    ix00[3] = 1; // AVI_INDEX_OF_CHUNKS
+    qToLittleEndian<quint32>(count, reinterpret_cast<uchar *>(ix00.data() + 4));
+    std::copy_n("00db", 4, ix00.data() + 8);
+
+    QByteArray moviBody;
+    const qsizetype ixChunkOffsetInMovi = moviBody.size();
+    appendChunk(moviBody, "ix00", ix00);
+    const quint64 moviStartInFile = static_cast<quint64>(12 + aviBody.size() + 12);
+    const quint64 ixChunkOffsetInFile = moviStartInFile + static_cast<quint64>(ixChunkOffsetInMovi);
+    const quint64 qwBaseOffset = moviStartInFile + static_cast<quint64>(moviBody.size());
+
+    QVector<quint64> frameChunkOffsets;
+    QByteArray idx1;
+    // Include 7Fxx header entry and absolute offsets just like real SeeStar AVIs.
+    idx1.append("7Fxx", 4);
+    appendU32(idx1, 0U);
+    appendU32(idx1, static_cast<quint32>(ixChunkOffsetInFile));
+    appendU32(idx1, 0U);
+
+    for (const QByteArray &frame : frames) {
+        const quint64 chunkAbsOffset = moviStartInFile + static_cast<quint64>(moviBody.size());
+        frameChunkOffsets.append(chunkAbsOffset);
+        appendChunk(moviBody, "00db", frame);
+        QByteArray junk(16, '\0');
+        appendChunk(moviBody, "JUNK", junk);
+
+        idx1.append("00db", 4);
+        appendU32(idx1, 0x10U);
+        appendU32(idx1, static_cast<quint32>(chunkAbsOffset));
+        appendU32(idx1, static_cast<quint32>(frame.size()));
+    }
+
+    appendList(aviBody, "movi", moviBody);
+    appendChunk(aviBody, "idx1", idx1);
+
+    QByteArray file;
+    file.append("RIFF", 4);
+    appendU32(file, static_cast<quint32>(aviBody.size() + 4));
+    file.append("AVI ", 4);
+    file.append(aviBody);
+
+    // Patch super-index (indx) and standard index (ix00) in place
+    qToLittleEndian<quint64>(ixChunkOffsetInFile,
+                             reinterpret_cast<uchar *>(file.data() + indxPayloadOffsetInFile + 24));
+    qToLittleEndian<quint32>(static_cast<quint32>(ixSize + 8),
+                             reinterpret_cast<uchar *>(file.data() + indxPayloadOffsetInFile + 32));
+    qToLittleEndian<quint32>(count,
+                             reinterpret_cast<uchar *>(file.data() + indxPayloadOffsetInFile + 36));
+
+    const qsizetype ixPayloadInFile = static_cast<qsizetype>(ixChunkOffsetInFile + 8);
+    qToLittleEndian<quint64>(qwBaseOffset, reinterpret_cast<uchar *>(file.data() + ixPayloadInFile + 12));
+    for (int i = 0; i < frames.size(); ++i) {
+        const qsizetype eOff = ixPayloadInFile + 24 + i * 8;
+        const quint32 relDataOffset = static_cast<quint32>((frameChunkOffsets[i] + 8ULL) - qwBaseOffset);
+        qToLittleEndian<quint32>(relDataOffset, reinterpret_cast<uchar *>(file.data() + eOff));
+        qToLittleEndian<quint32>(static_cast<quint32>(frames[i].size()),
+                                 reinterpret_cast<uchar *>(file.data() + eOff + 4));
+    }
+    return file;
 }
 
 void appendFixedText(QByteArray &data, const QByteArray &text, int size)
@@ -156,6 +320,11 @@ private slots:
     void cachesObjectRectDuringQualityAndReusesInExport();
     void appliesPostCropGainAndChannelLutWithPadding();
     void parallelQualityAndExportPreserveOrder();
+    void readsSeeStarStyleTopDownRawAviWithSidecar();
+    void warnsAndDetectsBayerWhenAviSidecarMissing();
+    void readsBottomUpPaddedRgbAviAndMultiRiffAvix();
+    void penalizesCloudObscuredFramesInQualityRanking();
+    void detectsDimSolarBayerObjectWithoutShattering();
 };
 
 void SerFileTests::readsHeaderAndFirstFrame()
@@ -926,6 +1095,363 @@ void SerFileTests::parallelQualityAndExportPreserveOrder()
         QCOMPARE(out.frameTimestamp(static_cast<std::uint32_t>(i)),
                  static_cast<quint64>(5000 + origIdx * 17));
     }
+}
+
+void SerFileTests::readsSeeStarStyleTopDownRawAviWithSidecar()
+{
+    constexpr int w = 24;
+    constexpr int h = 24;
+    QVector<QByteArray> frames;
+    for (int f = 0; f < 3; ++f) {
+        QByteArray buf(w * h, static_cast<char>(4));
+        for (int y = 4; y < 20; ++y) {
+            for (int x = 4; x < 20; ++x) {
+                // GRBG: (evenY, evenX)=G, (evenY, oddX)=R, (oddY, evenX)=B, (oddY, oddX)=G
+                int val = 100 + f * 5; // Green
+                if ((y & 1) == 0 && (x & 1) != 0) val = 200; // Red
+                else if ((y & 1) != 0 && (x & 1) == 0) val = 40; // Blue
+                buf[y * w + x] = static_cast<char>(val);
+            }
+        }
+        frames.append(buf);
+    }
+
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString aviPath = directory.filePath(QStringLiteral("2026-09-06-174431-Solar-RAW.avi"));
+    {
+        QFile aviOut(aviPath);
+        QVERIFY(aviOut.open(QIODevice::WriteOnly));
+        const QByteArray data = makeSeeStarStyleAvi(w, h, frames);
+        QCOMPARE(aviOut.write(data), data.size());
+    }
+    const QString txtPath = aviPath + QStringLiteral(".txt");
+    {
+        QFile txtOut(txtPath);
+        QVERIFY(txtOut.open(QIODevice::WriteOnly | QIODevice::Text));
+        txtOut.write(
+            "[imx585]\n"
+            "Bin = 1\n"
+            "Capture Area Size = 24 * 24\n"
+            "Colour Format = RAW8\n"
+            "Flip = None\n"
+            "Temperature = 41.4375 C\n"
+            "Bayer = GR\n"
+            "DATE-OBS = 2026-09-06T14:44:32.993747\n"
+            "SITELONG = 25.802500\n"
+            "SITELAT = 46.359700\n"
+            "OBJECT = Solar\n"
+            "Duration=79 Sec\n");
+    }
+
+    seeingforge::AviFile avi;
+    QVERIFY2(avi.open(aviPath), qPrintable(avi.errorString()));
+    QVERIFY(!avi.isMissingSidecar());
+    QVERIFY(avi.metadata().hasSidecar);
+    QVERIFY(avi.metadata().openDml);
+    QVERIFY(avi.metadata().topDown);
+    QCOMPARE(avi.metadata().objectName, QStringLiteral("Solar"));
+    QCOMPARE(avi.header().instrument, QStringLiteral("imx585"));
+    QCOMPARE(avi.header().width, static_cast<std::uint32_t>(w));
+    QCOMPARE(avi.header().height, static_cast<std::uint32_t>(h));
+    QCOMPARE(avi.header().pixelDepth, 8U);
+    QCOMPARE(avi.header().colorId, 9U); // GRBG
+    QCOMPARE(avi.header().frameCount, 3U);
+
+    const std::uint64_t t0 = avi.frameTimestamp(0);
+    const std::uint64_t t1 = avi.frameTimestamp(1);
+    QVERIFY(t0 > 630000000000000000ULL);
+    QCOMPARE(t1 - t0, 684896ULL);
+
+    const QImage f0 = avi.readFrame(0);
+    QVERIFY(!f0.isNull());
+    QCOMPARE(static_cast<int>(f0.constScanLine(4)[5]), 200); // Red in GRBG
+    QCOMPARE(static_cast<int>(f0.constScanLine(4)[4]), 100); // Green in GRBG
+    QCOMPARE(static_cast<int>(f0.constScanLine(5)[4]), 40);  // Blue in GRBG
+
+    seeingforge::PreviewSettings pset;
+    pset.autoStretch = false;
+    pset.whiteBalance = false;
+    const auto preview = seeingforge::PreviewProcessor::render(f0, avi.header().colorId, pset);
+    const QColor c = preview.processed.pixelColor(10, 10);
+    QCOMPARE(c.red(), 200);
+    QCOMPARE(c.green(), 100);
+    QCOMPARE(c.blue(), 40);
+
+    seeingforge::SerExportSettings exportSettings;
+    exportSettings.frameIndices = {0, 2};
+    exportSettings.centerObject = true;
+    exportSettings.detectionThreshold = 16;
+    exportSettings.outputSize = QSize(20, 20);
+    const QString serPath = directory.filePath(QStringLiteral("exported.ser"));
+    const auto exportRes = seeingforge::SerExporter::exportFrames(avi, serPath, exportSettings);
+    QVERIFY2(exportRes.success, qPrintable(exportRes.error));
+    QVERIFY(exportRes.timestampsPreserved);
+
+    seeingforge::SerFile serOut;
+    QVERIFY2(serOut.open(serPath), qPrintable(serOut.errorString()));
+    QCOMPARE(serOut.header().colorId, 9U);
+    QCOMPARE(serOut.header().frameCount, 2U);
+    QCOMPARE(serOut.frameTimestamp(0), t0);
+    QCOMPARE(serOut.frameTimestamp(1), avi.frameTimestamp(2));
+}
+
+void SerFileTests::warnsAndDetectsBayerWhenAviSidecarMissing()
+{
+    constexpr int w = 80;
+    constexpr int h = 80;
+    QByteArray bayerFrame(w * h, '\0');
+    QByteArray monoFrame(w * h, '\0');
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const int grad = (x + y) / 4;
+            // GBRG: (0,0)=G, (1,0)=B, (0,1)=R, (1,1)=G
+            int bayerVal = 110 + grad;
+            if ((y & 1) == 0 && (x & 1) != 0) bayerVal = 40 + grad; // B
+            else if ((y & 1) != 0 && (x & 1) == 0) bayerVal = 180 + grad; // R
+            bayerFrame[y * w + x] = static_cast<char>(bayerVal);
+            monoFrame[y * w + x] = static_cast<char>(100 + grad);
+        }
+    }
+
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString aviPath = directory.filePath(QStringLiteral("no-sidecar.avi"));
+    {
+        QFile aviOut(aviPath);
+        QVERIFY(aviOut.open(QIODevice::WriteOnly));
+        aviOut.write(makeSeeStarStyleAvi(w, h, {bayerFrame}));
+    }
+
+    seeingforge::AviFile avi;
+    QVERIFY2(avi.open(aviPath), qPrintable(avi.errorString()));
+    QVERIFY(avi.isMissingSidecar());
+    QCOMPARE(avi.header().colorId, 0U);
+    QCOMPARE(avi.frameTimestamp(0), 0ULL);
+
+    const auto detected = seeingforge::BayerPatternAnalyzer::detectPattern(avi.readFrame(0));
+    QVERIFY(detected.discrepancy);
+    QCOMPARE(detected.suggestedColorId, 10U); // GBRG
+    QVERIFY(detected.confidence > 0.45);
+
+    QImage monoImg(w, h, QImage::Format_Grayscale8);
+    for (int y = 0; y < h; ++y) {
+        std::memcpy(monoImg.scanLine(y), monoFrame.constData() + y * w, static_cast<std::size_t>(w));
+    }
+    const auto monoAnalysis = seeingforge::BayerPatternAnalyzer::detectPattern(monoImg);
+    QVERIFY(!monoAnalysis.discrepancy);
+}
+
+void SerFileTests::readsBottomUpPaddedRgbAviAndMultiRiffAvix()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+
+    // 1. Unindexed bottom-up 24-bit BGR AVI with odd width (5x2 -> row stride 16)
+    {
+        constexpr int w = 5;
+        constexpr int h = 2;
+        constexpr int stride = 16;
+        QByteArray rawFrame(stride * h, '\0');
+        // Bottom-up: row 0 in file is bottom image row (y=1): blue=(255,0,0) BGR
+        // row 1 in file is top image row (y=0): red=(0,0,255) BGR
+        for (int x = 0; x < w; ++x) {
+            rawFrame[x * 3 + 0] = static_cast<char>(255); // B
+            rawFrame[stride + x * 3 + 2] = static_cast<char>(255); // R
+        }
+
+        QByteArray strlBody;
+        appendChunk(strlBody, "strh", buildStrhChunk("DIB ", 1U, 10U, 1U));
+        appendChunk(strlBody, "strf", buildStrfChunk(w, h, 24U, "\0\0\0\0", static_cast<quint32>(rawFrame.size())));
+        QByteArray hdrlBody;
+        appendChunk(hdrlBody, "avih", buildAviHeaderChunk(100000U, 1U, w, h));
+        appendList(hdrlBody, "strl", strlBody);
+
+        QByteArray moviBody;
+        appendChunk(moviBody, "00db", rawFrame);
+        QByteArray aviBody;
+        appendList(aviBody, "hdrl", hdrlBody);
+        appendList(aviBody, "movi", moviBody);
+
+        QByteArray file;
+        file.append("RIFF", 4);
+        appendU32(file, static_cast<quint32>(aviBody.size() + 4));
+        file.append("AVI ", 4);
+        file.append(aviBody);
+
+        const QString rgbPath = directory.filePath(QStringLiteral("bottomup_rgb.avi"));
+        QFile f(rgbPath);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(file);
+        f.close();
+
+        seeingforge::AviFile avi;
+        QVERIFY2(avi.open(rgbPath), qPrintable(avi.errorString()));
+        QVERIFY(!avi.isMissingSidecar());
+        QVERIFY(!avi.metadata().topDown);
+        QCOMPARE(avi.header().colorId, 101U);
+        QCOMPARE(avi.header().frameCount, 1U);
+        const QImage img = avi.readFrame(0);
+        QCOMPARE(img.pixelColor(0, 0), QColor(255, 0, 0));
+        QCOMPARE(img.pixelColor(4, 1), QColor(0, 0, 255));
+    }
+
+    // 2. Multi-RIFF OpenDML AVIX fallback via movi scan
+    {
+        constexpr int w = 4;
+        constexpr int h = 4;
+        QByteArray f0(w * h, static_cast<char>(42));
+        QByteArray f1(w * h, static_cast<char>(99));
+
+        QByteArray strlBody;
+        appendChunk(strlBody, "strh", buildStrhChunk("DIB ", 1U, 20U, 2U));
+        appendChunk(strlBody, "strf", buildStrfChunk(w, -h, 8U, "Y800", static_cast<quint32>(w * h)));
+        QByteArray hdrlBody;
+        appendChunk(hdrlBody, "avih", buildAviHeaderChunk(50000U, 2U, w, h));
+        appendList(hdrlBody, "strl", strlBody);
+
+        QByteArray movi1;
+        appendChunk(movi1, "00db", f0);
+        QByteArray aviBody;
+        appendList(aviBody, "hdrl", hdrlBody);
+        appendList(aviBody, "movi", movi1);
+
+        QByteArray movi2;
+        appendChunk(movi2, "00db", f1);
+        QByteArray avixBody;
+        appendList(avixBody, "movi", movi2);
+
+        QByteArray file;
+        file.append("RIFF", 4);
+        appendU32(file, static_cast<quint32>(aviBody.size() + 4));
+        file.append("AVI ", 4);
+        file.append(aviBody);
+        file.append("RIFF", 4);
+        appendU32(file, static_cast<quint32>(avixBody.size() + 4));
+        file.append("AVIX", 4);
+        file.append(avixBody);
+
+        const QString avixPath = directory.filePath(QStringLiteral("multiriff.avi"));
+        QFile f(avixPath);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(file);
+        f.close();
+
+        seeingforge::AviFile avi;
+        QVERIFY2(avi.open(avixPath), qPrintable(avi.errorString()));
+        QVERIFY(avi.metadata().openDml);
+        QCOMPARE(avi.header().frameCount, 2U);
+        QCOMPARE(static_cast<int>(avi.readFrame(0).constScanLine(0)[0]), 42);
+        QCOMPARE(static_cast<int>(avi.readFrame(1).constScanLine(0)[0]), 99);
+    }
+
+    // 3. Compressed codec rejection (MJPG)
+    {
+        QByteArray strlBody;
+        appendChunk(strlBody, "strh", buildStrhChunk("MJPG", 1U, 25U, 1U));
+        appendChunk(strlBody, "strf", buildStrfChunk(16, 16, 24U, "MJPG", 100U));
+        QByteArray hdrlBody;
+        appendChunk(hdrlBody, "avih", buildAviHeaderChunk(40000U, 1U, 16U, 16U));
+        appendList(hdrlBody, "strl", strlBody);
+        QByteArray aviBody;
+        appendList(aviBody, "hdrl", hdrlBody);
+
+        QByteArray file;
+        file.append("RIFF", 4);
+        appendU32(file, static_cast<quint32>(aviBody.size() + 4));
+        file.append("AVI ", 4);
+        file.append(aviBody);
+
+        const QString mjpgPath = directory.filePath(QStringLiteral("compressed.avi"));
+        QFile f(mjpgPath);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(file);
+        f.close();
+
+        seeingforge::AviFile avi;
+        QVERIFY(!avi.open(mjpgPath));
+        QVERIFY(avi.errorString().contains(QStringLiteral("MJPG")));
+    }
+}
+
+void SerFileTests::penalizesCloudObscuredFramesInQualityRanking()
+{
+    constexpr int w = 64;
+    constexpr int h = 64;
+    constexpr int count = 8;
+    QByteArray data = monoSer();
+    data.truncate(static_cast<qsizetype>(seeingforge::SerFile::HeaderSize));
+    qToLittleEndian<quint32>(w, reinterpret_cast<uchar *>(data.data() + 26));
+    qToLittleEndian<quint32>(h, reinterpret_cast<uchar *>(data.data() + 30));
+    qToLittleEndian<quint32>(count, reinterpret_cast<uchar *>(data.data() + 38));
+
+    for (int f = 0; f < count; ++f) {
+        QByteArray frame(w * h, static_cast<char>(4));
+        const bool clouded = f >= 5;
+        const int yLimit = clouded ? 22 : 52;
+        for (int y = 12; y < yLimit; ++y) {
+            for (int x = 12; x < 52; ++x) {
+                int val = 150 + ((x + y) & 1) * 10;
+                if (clouded && ((x ^ y) & 1) != 0) {
+                    // Steep high-frequency cloud edge artifact
+                    val = 210;
+                }
+                frame[y * w + x] = static_cast<char>(val);
+            }
+        }
+        data.append(frame);
+    }
+
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("clouds.ser"));
+    {
+        QFile f(path);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(data);
+    }
+
+    seeingforge::SerFile ser;
+    QVERIFY2(ser.open(path), qPrintable(ser.errorString()));
+    const auto quality = seeingforge::QualityAnalyzer::analyze(ser, 16);
+    QCOMPARE(quality.frames.size(), count);
+
+    for (int f = 0; f < 5; ++f) {
+        QVERIFY(quality.frames[f].targetCoverage >= 0.98);
+    }
+    for (int f = 5; f < count; ++f) {
+        QVERIFY(quality.frames[f].targetCoverage < 0.50);
+    }
+    for (int rank = 0; rank < 5; ++rank) {
+        QVERIFY(quality.rankedFrameIndices[rank] < 5U);
+    }
+    for (int rank = 5; rank < count; ++rank) {
+        QVERIFY(quality.rankedFrameIndices[rank] >= 5U);
+    }
+}
+
+void SerFileTests::detectsDimSolarBayerObjectWithoutShattering()
+{
+    constexpr int w = 32;
+    constexpr int h = 32;
+    QImage raw(w, h, QImage::Format_Grayscale8);
+    raw.fill(2);
+    for (int y = 8; y < 24; ++y) {
+        uchar *line = raw.scanLine(y);
+        for (int x = 8; x < 24; ++x) {
+            // GRBG: Red=(oddX, evenY)=44, Green=12 (<16), Blue=4 (<16)
+            if ((y & 1) == 0 && (x & 1) != 0) line[x] = 44;
+            else if ((y & 1) != 0 && (x & 1) == 0) line[x] = 4;
+            else line[x] = 12;
+        }
+    }
+
+    const auto rawBfs = seeingforge::ObjectDetector::detect(raw, 16, 20, 900, false);
+    QVERIFY(!rawBfs.found());
+
+    const auto bayerBfs = seeingforge::ObjectDetector::detect(raw, 16, 20, 900, true);
+    QVERIFY(bayerBfs.found());
+    QCOMPARE(bayerBfs.objectRect, QRect(8, 8, 16, 16));
 }
 
 QTEST_MAIN(SerFileTests)

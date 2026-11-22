@@ -1,6 +1,6 @@
 # SeeingForge
 
-SeeingForge is an open-source desktop application for preparing planetary and lunar SER recordings and DSLR RAW image sequences for stacking.
+SeeingForge is an open-source desktop application for preparing planetary, lunar, and solar SER and uncompressed/RAW AVI recordings (including ZWO SeeStar RAW AVIs) and DSLR RAW image sequences for stacking.
 
 ![SeeingForge v0.3.0 preparing a 356-frame 16-bit INDI lunar SER recording with automatic ROI Bayer mismatch detection](docs/images/seeingforge-preview.jpg)
 
@@ -14,30 +14,36 @@ SeeingForge was built with substantial assistance from OpenAI's Codex AI coding 
 
 ## Platform status
 
-**Early experimental software. Only Fedora 44 has been tested.**
+**Early experimental software. Tested on Fedora 44 and Fedora 45.**
 
 The application uses C++20 and Qt 6 and is designed for Linux, Windows, and macOS. Linux is the primary development platform. Windows packages receive automated build and test coverage and limited hands-on testing. macOS packages receive automated build and test coverage but have not yet been tested on physical Mac hardware.
 
 ### Imaging test coverage
 
-Hands-on astronomical testing has so far covered only full-disc lunar and full-disc solar recordings. Close-up lunar or solar surface recordings have not yet been tested, so detection, stabilization, cropping, and quality selection may need further adjustment for those workflows.
+Hands-on astronomical testing has covered full-disc lunar and full-disc solar SER recordings, DSLR RAW sequences, and ZWO SeeStar RAW AVI recordings (with `.avi.txt` sidecar metadata). Close-up lunar or solar surface recordings have not yet been tested, so detection, stabilization, cropping, and quality selection may need further adjustment for those workflows.
 
 ## Features
 
 - Guided 5-step export pipeline (**Source & Sensor**, **Calibration**, **Stabilize & Crop**, **Quality Ranking**, and **Export SER**) with telemetry summary tiles, built-in and custom saved **Session Presets**, and an anchored step footer.
-- SER input with 8–16-bit monochrome, Bayer, and RGB/BGR data (including INDI recordings), plus multi-file or folder import of DSLR RAW sequences through LibRaw (CR2 and other supported camera formats), accessible via the File menu, empty-state quick-start hub, or drag-and-drop.
-- Automatic ROI Bayer CFA pattern mismatch detection in **Source & Sensor** with manual pattern override for preview and export.
+- SER input with 8–16-bit monochrome, Bayer, and RGB/BGR data (including INDI recordings), cross-platform uncompressed/RAW AVI & OpenDML AVI support (8-bit/16-bit raw and 24-bit/32-bit RGB/BGR, including ZWO SeeStar RAW AVIs with `.avi.txt` sidecar metadata and UTC timestamps), plus multi-file or folder import of DSLR RAW sequences through LibRaw (CR2 and other supported camera formats), accessible via the File menu, empty-state quick-start hub, or drag-and-drop.
+- Automatic ROI Bayer CFA pattern mismatch detection (and automatic Bayer mosaic detection with missing-sidecar warnings when an uncompressed AVI lacks its `.avi.txt` metadata file) in **Source & Sensor**, with manual pattern override for preview and export.
 - Top-bar **Display [Preview]** popover separating preview-only adjustments (debayer method, auto white balance, red/blue balance, saturation, hue shift, preview gain/gamma, and auto-stretch) from export-affecting steps so display tuning is available at every stage.
 - Viewport modes for **Color**, **Raw Luminance**, and 1:1 **Raw CFA** mosaic inspection; toggleable **Object & Crop**, **Hot Pixels**, and **Center Axis** overlays; mouse-wheel zoom, click-drag panning when zoomed, frame playback (`Space`), and keyboard frame stepping (`←`/`→`).
 - Persistent hot-pixel detection and overlay inspection across sampled frames.
-- Threshold-based object detection, 90°/180°/270° orientation and horizontal/vertical flips, selectable crop margins, and ÷4-aligned export canvas dimensions.
-- Multi-threaded **Quality Ranking** with progress/cancellation, clickable quality curve with visible keep-cutoff line, `All` / `Kept` / `Clipped` filter chips, single-click frame inspection, overexposed-frame rejection, and deterministic unclamped ranking (keep best 10%, 25%, 50%, 75%, or 100%).
+- Bayer-aware threshold object detection, 90°/180°/270° orientation and horizontal/vertical flips, selectable crop margins, and ÷4-aligned export canvas dimensions.
+- Multi-threaded **Quality Ranking** with progress/cancellation, clickable quality curve with visible keep-cutoff line, `All` / `Kept` / `Clipped` / `Obscured` filter chips, single-click frame inspection, overexposed and cloud/obscured-frame rejection (`targetCoverage`), and deterministic unclamped ranking (keep best 10%, 25%, 50%, 75%, or 100%).
 - Capture-order or quality-score inspection and export ordering, using the best-ranked eligible frame as the reference for automatic crop sizing and neutral balance when quality analysis has been run.
 - High-speed multi-threaded RAW sequence validation, hot-pixel scanning, and batched parallel SER export with cached per-frame object detection, post-crop LUT intensity/channel scaling, and preloaded SER frame timestamps.
 - Linear 16-bit Bayer SER export from RAW sequences with sensor black-level subtraction and white-level normalization, optional camera white balance or highlight-safe automatic neutral balance, fixed 2×–16× or automatic 90%-peak intensity gain, and full-resolution or 2×2 binned monochrome export.
 - Export progress and cancellation without committing a partial SER file, plus post-export quick actions (**Open Folder**, **Inspect Output**, and **Copy Path**).
 
 Exports go beside the source in a `seeingforge_yyyymmdd_hhmm` folder; repeated exports within one minute receive a numeric suffix. The original recording is not modified.
+
+## Working with ZWO SeeStar & RAW AVI recordings
+
+Use **File > Open AVI Recording…**, **File > Open SER File…**, the Quick-Start Hub, or drag and drop an `.avi` file (optionally alongside its `.avi.txt` metadata file) onto the window. SeeingForge reads uncompressed 8-bit/16-bit raw and 24-bit/32-bit RGB/BGR AVIs (including OpenDML AVIs larger than 2 GB) natively in C++ across Linux, Windows, and macOS without external video codecs.
+
+For raw single-plane AVIs (such as ZWO SeeStar `RAW8` recordings), SeeingForge looks for the accompanying `.avi.txt` (or `<name>.txt`) sidecar file to read the Bayer CFA pattern (e.g., `Bayer = GR` → `GRBG`), camera/sensor metadata, and UTC `DATE-OBS` timestamp for per-frame SER timestamp preservation. If the `.txt` file is missing, SeeingForge warns the user, inspects the pixel mosaic to suggest the Bayer pattern if present, and allows manual pattern override in **Source & Sensor**. In **Quality Ranking**, the **Reject obscured / dim (min signal)** filter helps exclude passing clouds or haze drops automatically alongside overexposed-frame rejection.
 
 ## Working with DSLR RAW sequences
 
@@ -55,11 +61,12 @@ The crop selected in **Stabilize & Crop** remains visible in **Quality Ranking**
 - Quality scores are experimental and relative to the current recording. Noise and exposure changes can affect ranking; inspect the results.
 - Centering uses the largest detected object's bounding box, not subpixel registration. A frame with no detection falls back to the source center. Bayer shifts use even-pixel offsets; uncovered edges are black.
 - Full-resolution Bayer monochrome supports RGGB, GRBG, GBRG, and BGGR. Complementary-colour Bayer formats require binning for monochrome export.
+- Compressed AVI video codecs (such as MJPEG, H.264, or FFV1) are not supported; AVI input is intended for uncompressed planetary/solar/lunar recordings (`DIB` / `BI_RGB`, `RAW`, `Y800`, `Y16`).
 - SER is currently the only export format. Additional formats are intended for future development.
 
 ## Future updates
 
-The next planned update is **SeeStar support**, beginning with its RAW AVI recordings and the accompanying TXT metadata file. SeeingForge will expect the matching TXT file beside the AVI and warn the user when it is missing.
+Planned future work includes additional output format options, hot-pixel correction, and support for additional telescope/camera capture metadata variants.
 
 ## Build
 
@@ -71,7 +78,7 @@ system security warning on first launch.
 
 ### Build from source
 
-Requires a C++20 compiler, CMake 3.25+, Ninja, LibRaw, and Qt 6.6+ with Core, Gui, Widgets, Concurrent, and Test. On Fedora 44:
+Requires a C++20 compiler, CMake 3.25+, Ninja, LibRaw, and Qt 6.6+ with Core, Gui, Widgets, Concurrent, and Test. On Fedora 44 / 45:
 
 ```bash
 sudo dnf install gcc-c++ cmake ninja-build qt6-qtbase-devel LibRaw-devel

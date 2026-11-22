@@ -7,10 +7,27 @@
 namespace seeingforge {
 
 DetectionResult ObjectDetector::detect(const QImage &frame, int threshold,
-                                       int marginPercent, int analysisMaxDimension)
+                                       int marginPercent, int analysisMaxDimension,
+                                       bool bayerMosaic)
 {
     if (frame.isNull()) return {};
     QImage gray = frame.convertToFormat(QImage::Format_Grayscale8);
+    if (bayerMosaic && gray.width() >= 16 && gray.height() >= 16) {
+        const int binnedWidth = gray.width() / 2;
+        const int binnedHeight = gray.height() / 2;
+        QImage binned(binnedWidth, binnedHeight, QImage::Format_Grayscale8);
+        for (int y = 0; y < binnedHeight; ++y) {
+            const uchar *top = gray.constScanLine(y * 2);
+            const uchar *bottom = gray.constScanLine(y * 2 + 1);
+            uchar *dst = binned.scanLine(y);
+            for (int x = 0; x < binnedWidth; ++x) {
+                const int sx = x * 2;
+                dst[x] = static_cast<uchar>((top[sx] + top[sx + 1]
+                                             + bottom[sx] + bottom[sx + 1] + 2) / 4);
+            }
+        }
+        gray = std::move(binned);
+    }
     if (std::max(gray.width(), gray.height()) > analysisMaxDimension) {
         gray = gray.scaled(analysisMaxDimension, analysisMaxDimension,
                            Qt::KeepAspectRatio, Qt::FastTransformation);

@@ -19,6 +19,7 @@ class BayerPatternAnalyzer {
 public:
     [[nodiscard]] static BayerPatternAnalysis analyze(
         const QImage &frame, std::uint32_t declaredColorId);
+    [[nodiscard]] static BayerPatternAnalysis detectPattern(const QImage &frame);
     [[nodiscard]] static std::array<double, 3> neutralBalanceGains(
         const QImage &frame, std::uint32_t colorId, const QRect &target = {});
 };

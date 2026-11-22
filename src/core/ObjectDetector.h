@@ -18,7 +18,8 @@ public:
     [[nodiscard]] static DetectionResult detect(const QImage &frame,
                                                 int threshold,
                                                 int marginPercent,
-                                                int analysisMaxDimension = 900);
+                                                int analysisMaxDimension = 900,
+                                                bool bayerMosaic = false);
 };
 
 } // namespace seeingforge

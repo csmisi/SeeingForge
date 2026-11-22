@@ -253,7 +253,7 @@ ExportResult SerExporter::exportFrames(
             } else {
                 const QImage decoded = source.decodeFrame(frame);
                 const DetectionResult detection = ObjectDetector::detect(
-                    decoded, settings.detectionThreshold, 0);
+                    decoded, settings.detectionThreshold, 0, 900, bayerSource);
                 if (detection.found()) {
                     originX = detection.objectRect.center().x() - outputWidth / 2;
                     originY = detection.objectRect.center().y() - outputHeight / 2;

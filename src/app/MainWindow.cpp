@@ -62,6 +62,69 @@
 
 namespace {
 
+struct QualitySelection {
+    QVector<double> clippedByIndex;
+    QVector<double> coverageByIndex;
+    QVector<double> scoreByIndex;
+    QVector<quint8> isClippedByIndex;
+    QVector<quint8> isObscuredByIndex;
+    QVector<std::uint32_t> eligibleFrames;
+    QSet<std::uint32_t> accepted;
+    int clippedCount = 0;
+    int obscuredCount = 0;
+    int keepCount = 0;
+};
+
+QualitySelection evaluateQualitySelection(const seeingforge::QualityResult &quality,
+                                          std::uint32_t frameCount,
+                                          bool rejectClipped, int maxClippedPercent,
+                                          bool rejectObscured, int minSignalPercent,
+                                          int keepPercent)
+{
+    QualitySelection sel;
+    const qsizetype count = static_cast<qsizetype>(frameCount);
+    sel.clippedByIndex.fill(0.0, count);
+    sel.coverageByIndex.fill(1.0, count);
+    sel.scoreByIndex.fill(0.0, count);
+    sel.isClippedByIndex.fill(0, count);
+    sel.isObscuredByIndex.fill(0, count);
+
+    for (const auto &frame : quality.frames) {
+        const qsizetype idx = static_cast<qsizetype>(frame.frameIndex);
+        if (idx < count) {
+            sel.clippedByIndex[idx] = frame.clippedPercent;
+            sel.coverageByIndex[idx] = frame.targetCoverage;
+            sel.scoreByIndex[idx] = frame.score;
+        }
+    }
+
+    for (const std::uint32_t frameIndex : quality.rankedFrameIndices) {
+        const qsizetype idx = static_cast<qsizetype>(frameIndex);
+        const bool isClipped = rejectClipped && sel.clippedByIndex[idx] > maxClippedPercent;
+        const bool isObscured = rejectObscured
+            && (sel.coverageByIndex[idx] * 100.0) < static_cast<double>(minSignalPercent);
+        if (isClipped) {
+            sel.isClippedByIndex[idx] = 1;
+            ++sel.clippedCount;
+        }
+        if (isObscured) {
+            sel.isObscuredByIndex[idx] = 1;
+            ++sel.obscuredCount;
+        }
+        if (!isClipped && !isObscured) {
+            sel.eligibleFrames.append(frameIndex);
+        }
+    }
+
+    sel.keepCount = sel.eligibleFrames.isEmpty() ? 0 : std::clamp(
+        static_cast<int>(std::ceil(sel.eligibleFrames.size() * keepPercent / 100.0)),
+        1, static_cast<int>(sel.eligibleFrames.size()));
+    for (int rank = 0; rank < sel.keepCount; ++rank) {
+        sel.accepted.insert(sel.eligibleFrames[rank]);
+    }
+    return sel;
+}
+
 QStringList rawExtensionFilters()
 {
     return {QStringLiteral("*.cr2"), QStringLiteral("*.CR2"),
@@ -569,7 +632,7 @@ MainWindow::MainWindow(QWidget *parent)
     updateWorkflowSummaries();
     updateHeroSummary();
     updateFooterNavigation();
-    showStatus(tr("Ready — open or drop a SER recording or RAW image sequence to begin."));
+    showStatus(tr("Ready — open or drop a SER / AVI recording or RAW image sequence to begin."));
 }
 
 void MainWindow::applyThemeStyleSheet()
@@ -729,6 +792,10 @@ void MainWindow::createActions()
     connect(openAction, &QAction::triggered, this, &MainWindow::openSerFile);
     openAction->setObjectName(QStringLiteral("openSerAction"));
 
+    auto *openAviAction = new QAction(tr("Open &AVI Recording…"), this);
+    connect(openAviAction, &QAction::triggered, this, &MainWindow::openAviFile);
+    openAviAction->setObjectName(QStringLiteral("openAviAction"));
+
     auto *openRawAction = new QAction(tr("Open &RAW Image Sequence…"), this);
     connect(openRawAction, &QAction::triggered, this, &MainWindow::openRawFiles);
     openRawAction->setObjectName(QStringLiteral("openRawAction"));
@@ -761,6 +828,7 @@ void MainWindow::createMenus()
 {
     auto *fileMenu = menuBar()->addMenu(tr("&File"));
     fileMenu->addAction(findChild<QAction *>(QStringLiteral("openSerAction")));
+    fileMenu->addAction(findChild<QAction *>(QStringLiteral("openAviAction")));
     fileMenu->addAction(findChild<QAction *>(QStringLiteral("openRawAction")));
     fileMenu->addAction(findChild<QAction *>(QStringLiteral("openRawFolderAction")));
     fileMenu->addSeparator();
@@ -948,7 +1016,7 @@ QWidget *MainWindow::createHeroHeader()
     statusTextCol->setSpacing(0);
     m_previewStateLabel = new QLabel(tr("Waiting for source"), statusPill);
     m_previewStateLabel->setStyleSheet(QStringLiteral("color: #e8ecf2; font-size: 11px; font-weight: 600;"));
-    m_pipelineStateLabel = new QLabel(tr("Drop or open SER / RAW"), statusPill);
+    m_pipelineStateLabel = new QLabel(tr("Drop or open SER / AVI / RAW"), statusPill);
     m_pipelineStateLabel->setStyleSheet(QStringLiteral("color: #8d96a5; font-size: 10px;"));
     statusTextCol->addWidget(m_previewStateLabel);
     statusTextCol->addWidget(m_pipelineStateLabel);
@@ -984,7 +1052,7 @@ QWidget *MainWindow::createWorkflowPanel()
         bool optionalBadge;
     };
     static constexpr std::array<StepSpec, 5> specs{{
-        {"Source & Sensor", "Load SER or RAW frames", false},
+        {"Source & Sensor", "Load SER, AVI, or RAW", false},
         {"Calibration", "Sensor balance & hot pixels", true},
         {"Stabilize & Crop", "Detect target & crop margin", false},
         {"Quality Ranking", "Score & filter sharp frames", false},
@@ -1194,13 +1262,13 @@ QWidget *MainWindow::createPreviewPanel()
 
     // Empty-state D112 Quick-Start Hub
     m_emptyHub = makeCard(m_previewCanvas, 28, 24);
-    m_emptyHub->setMaximumWidth(500);
-    auto *hubTitle = new QLabel(tr("Open a SER recording or RAW image sequence"), m_emptyHub);
+    m_emptyHub->setMaximumWidth(540);
+    auto *hubTitle = new QLabel(tr("Open a SER / AVI recording or RAW image sequence"), m_emptyHub);
     hubTitle->setAlignment(Qt::AlignCenter);
     hubTitle->setWordWrap(true);
     hubTitle->setStyleSheet(QStringLiteral("color: #ffffff; font-size: 17px; font-weight: 700;"));
     auto *hubSub = new QLabel(
-        tr("Choose a source below, use the File menu, or drag and drop a .ser file, RAW files, or a RAW folder directly onto the window."),
+        tr("Choose a source below, use the File menu, or drag and drop a .ser or .avi file, RAW files, or a RAW folder directly onto the window."),
         m_emptyHub);
     hubSub->setAlignment(Qt::AlignCenter);
     hubSub->setWordWrap(true);
@@ -1210,14 +1278,17 @@ QWidget *MainWindow::createPreviewPanel()
 
     auto *hubBtns = new QHBoxLayout;
     hubBtns->setSpacing(8);
-    auto *hubSer = new QPushButton(tr("Open SER File…"), m_emptyHub);
+    auto *hubSer = new QPushButton(tr("Open SER…"), m_emptyHub);
     hubSer->setProperty("sfRole", QStringLiteral("primary"));
     connect(hubSer, &QPushButton::clicked, this, &MainWindow::openSerFile);
+    auto *hubAvi = new QPushButton(tr("Open AVI…"), m_emptyHub);
+    connect(hubAvi, &QPushButton::clicked, this, &MainWindow::openAviFile);
     auto *hubRaw = new QPushButton(tr("RAW Files…"), m_emptyHub);
     connect(hubRaw, &QPushButton::clicked, this, &MainWindow::openRawFiles);
     auto *hubFolder = new QPushButton(tr("RAW Folder…"), m_emptyHub);
     connect(hubFolder, &QPushButton::clicked, this, &MainWindow::openRawFolder);
     hubBtns->addWidget(hubSer, 1);
+    hubBtns->addWidget(hubAvi, 1);
     hubBtns->addWidget(hubRaw, 1);
     hubBtns->addWidget(hubFolder, 1);
     static_cast<QVBoxLayout *>(m_emptyHub->layout())->addSpacing(4);
@@ -1483,25 +1554,28 @@ QWidget *MainWindow::createSourceInspector()
     layout->addWidget(makeStepHeaderCard(
         0, tr("Source & Sensor"), tr("WAITING"),
         QStringLiteral("#232830"), QStringLiteral("#3a414e"), QStringLiteral("#aab2bd"),
-        tr("Load a SER recording or RAW image sequence, inspect metadata, and verify the Bayer CFA pattern."),
+        tr("Load a SER or AVI recording or RAW image sequence, inspect metadata, and verify the Bayer CFA pattern."),
         &m_sourceStatusBadge, page));
 
     auto *loadCard = makeCard(page);
     auto *loadTitle = new QLabel(tr("Open Recording or RAW Sequence"), loadCard);
     loadTitle->setStyleSheet(QStringLiteral("color: #ffffff; font-size: 12px; font-weight: 700;"));
     loadCard->layout()->addWidget(loadTitle);
-    auto *openRow = new QHBoxLayout;
-    openRow->setSpacing(6);
+    auto *openGrid = new QGridLayout;
+    openGrid->setSpacing(6);
     auto *serBtn = new QPushButton(tr("SER File…"), loadCard);
     connect(serBtn, &QPushButton::clicked, this, &MainWindow::openSerFile);
+    auto *aviBtn = new QPushButton(tr("AVI File…"), loadCard);
+    connect(aviBtn, &QPushButton::clicked, this, &MainWindow::openAviFile);
     auto *rawBtn = new QPushButton(tr("RAW Files…"), loadCard);
     connect(rawBtn, &QPushButton::clicked, this, &MainWindow::openRawFiles);
     auto *dirBtn = new QPushButton(tr("RAW Folder…"), loadCard);
     connect(dirBtn, &QPushButton::clicked, this, &MainWindow::openRawFolder);
-    openRow->addWidget(serBtn, 1);
-    openRow->addWidget(rawBtn, 1);
-    openRow->addWidget(dirBtn, 1);
-    static_cast<QVBoxLayout *>(loadCard->layout())->addLayout(openRow);
+    openGrid->addWidget(serBtn, 0, 0);
+    openGrid->addWidget(aviBtn, 0, 1);
+    openGrid->addWidget(rawBtn, 1, 0);
+    openGrid->addWidget(dirBtn, 1, 1);
+    static_cast<QVBoxLayout *>(loadCard->layout())->addLayout(openGrid);
     layout->addWidget(loadCard);
 
     // 2x2 Source Telemetry Tiles
@@ -1542,14 +1616,21 @@ QWidget *MainWindow::createSourceInspector()
     m_bayerPattern->addItem(tr("GBRG"), 10);
     m_bayerPattern->addItem(tr("BGGR"), 11);
     connect(m_bayerPattern, &QComboBox::currentIndexChanged, this, [this] {
+        if (m_debayerMethod && m_source) {
+            m_debayerMethod->setEnabled(
+                seeingforge::PreviewProcessor::supportsDebayer(effectiveColorId()));
+        }
+        refreshCalibrationBalanceOptions(true);
         requestPreviewRender();
+        updateDetection();
+        updateMetadata();
         updateWorkflowSummaries();
         updateHeroSummary();
     });
     bayerCard->layout()->addWidget(m_bayerPattern);
 
     auto *bayerNote = new QLabel(
-        tr("Checked automatically when loading SER files. Override here if an ROI capture recorded the wrong Bayer pattern."),
+        tr("Checked automatically when loading SER and AVI files. Override here if an ROI capture or missing sidecar left the wrong Bayer pattern."),
         bayerCard);
     bayerNote->setWordWrap(true);
     bayerNote->setStyleSheet(QStringLiteral("color: #8d96a5; font-size: 11px;"));
@@ -1988,6 +2069,27 @@ QWidget *MainWindow::createQualityInspector()
     m_clippedRejectedCountLabel->setStyleSheet(QStringLiteral("color: #8d96a5; font-size: 11px;"));
     curveCard->layout()->addWidget(m_clippedRejectedCountLabel);
 
+    auto *obscuredRow = new QHBoxLayout;
+    m_rejectObscured = new QCheckBox(tr("Reject obscured / dim (min signal)"), curveCard);
+    m_rejectObscured->setChecked(true);
+    m_minTargetSignalPercent = new QSpinBox(curveCard);
+    m_minTargetSignalPercent->setRange(10, 99);
+    m_minTargetSignalPercent->setValue(80);
+    m_minTargetSignalPercent->setSuffix(QStringLiteral("%"));
+    connect(m_rejectObscured, &QCheckBox::toggled,
+            m_minTargetSignalPercent, &QSpinBox::setEnabled);
+    connect(m_rejectObscured, &QCheckBox::toggled,
+            this, &MainWindow::updateQualityDisplay);
+    connect(m_minTargetSignalPercent, &QSpinBox::valueChanged,
+            this, &MainWindow::updateQualityDisplay);
+    obscuredRow->addWidget(m_rejectObscured, 1);
+    obscuredRow->addWidget(m_minTargetSignalPercent);
+    static_cast<QVBoxLayout *>(curveCard->layout())->addLayout(obscuredRow);
+
+    m_obscuredRejectedCountLabel = new QLabel(tr("No obscured frames counted yet."), curveCard);
+    m_obscuredRejectedCountLabel->setStyleSheet(QStringLiteral("color: #8d96a5; font-size: 11px;"));
+    curveCard->layout()->addWidget(m_obscuredRejectedCountLabel);
+
     m_qualityLabel = new QLabel(tr("Quality has not been analyzed."), curveCard);
     m_qualityLabel->setWordWrap(true);
     m_qualityLabel->setStyleSheet(QStringLiteral("color: #9ca5b3; font-size: 11px;"));
@@ -2011,6 +2113,7 @@ QWidget *MainWindow::createQualityInspector()
     addFilterChip(tr("All"), 0, true);
     addFilterChip(tr("Kept"), 1, false);
     addFilterChip(tr("Clipped"), 2, false);
+    addFilterChip(tr("Obscured"), 3, false);
     connect(m_qualityFilterGroup, &QButtonGroup::idClicked,
             this, &MainWindow::updateQualityDisplay);
     filterRow->addStretch(1);
@@ -2295,6 +2398,29 @@ void MainWindow::dropEvent(QDropEvent *event)
             event->acceptProposedAction();
             return;
         }
+        if (info.suffix().compare(QStringLiteral("avi"), Qt::CaseInsensitive) == 0) {
+            loadAviFile(info.absoluteFilePath());
+            event->acceptProposedAction();
+            return;
+        }
+    }
+
+    QString aviPath;
+    bool onlyAviAndTxt = true;
+    for (const QString &path : localPaths) {
+        const QFileInfo info(path);
+        const QString suffix = info.suffix().toLower();
+        if (suffix == QLatin1String("avi") && aviPath.isEmpty()) {
+            aviPath = info.absoluteFilePath();
+        } else if (suffix != QLatin1String("txt")) {
+            onlyAviAndTxt = false;
+            break;
+        }
+    }
+    if (!aviPath.isEmpty() && onlyAviAndTxt) {
+        loadAviFile(aviPath);
+        event->acceptProposedAction();
+        return;
     }
 
     QStringList rawFiles;
@@ -2358,16 +2484,48 @@ void MainWindow::openSerFile()
         : (m_source && m_source->isOpen() ? m_source->sourceDirectory()
                               : QDir::homePath());
 
-    QFileDialog dialog(this, tr("Open SER Recording"));
+    QFileDialog dialog(this, tr("Open SER or AVI Recording"));
     dialog.setOption(QFileDialog::DontUseNativeDialog, true);
     dialog.setFileMode(QFileDialog::ExistingFile);
     dialog.setAcceptMode(QFileDialog::AcceptOpen);
-    dialog.setNameFilters({tr("SER recordings (*.ser *.SER)"), tr("All files (*)")});
+    dialog.setNameFilters({tr("SER & AVI recordings (*.ser *.SER *.avi *.AVI)"),
+                           tr("SER recordings (*.ser *.SER)"),
+                           tr("AVI recordings (*.avi *.AVI)"),
+                           tr("All files (*)")});
     dialog.setViewMode(QFileDialog::Detail);
     dialog.setDirectory(initialFolder);
     dialog.resize(1050, 650);
-    if (dialog.exec() == QDialog::Accepted && !dialog.selectedFiles().isEmpty())
-        loadSerFile(dialog.selectedFiles().constFirst());
+    if (dialog.exec() == QDialog::Accepted && !dialog.selectedFiles().isEmpty()) {
+        const QString selected = dialog.selectedFiles().constFirst();
+        if (QFileInfo(selected).suffix().compare(QStringLiteral("avi"), Qt::CaseInsensitive) == 0) {
+            loadAviFile(selected);
+        } else {
+            loadSerFile(selected);
+        }
+    }
+}
+
+void MainWindow::openAviFile()
+{
+    QSettings settings;
+    const QString savedFolder = settings.value(
+        QStringLiteral("files/lastOpenFolder")).toString();
+    const QString initialFolder = QDir(savedFolder).exists()
+        ? savedFolder
+        : (m_source && m_source->isOpen() ? m_source->sourceDirectory()
+                              : QDir::homePath());
+
+    QFileDialog dialog(this, tr("Open AVI Recording"));
+    dialog.setOption(QFileDialog::DontUseNativeDialog, true);
+    dialog.setFileMode(QFileDialog::ExistingFile);
+    dialog.setAcceptMode(QFileDialog::AcceptOpen);
+    dialog.setNameFilters({tr("AVI recordings (*.avi *.AVI)"), tr("All files (*)")});
+    dialog.setViewMode(QFileDialog::Detail);
+    dialog.setDirectory(initialFolder);
+    dialog.resize(1050, 650);
+    if (dialog.exec() == QDialog::Accepted && !dialog.selectedFiles().isEmpty()) {
+        loadAviFile(dialog.selectedFiles().constFirst());
+    }
 }
 
 void MainWindow::openRawFiles()
@@ -2404,6 +2562,20 @@ void MainWindow::loadSerFile(const QString &path)
     auto source = std::make_shared<seeingforge::SerFile>();
     if (!source->open(path)) {
         QMessageBox::critical(this, tr("Cannot Open SER File"), source->errorString());
+        return;
+    }
+    m_source = std::move(source);
+    QSettings settings;
+    settings.setValue(QStringLiteral("files/lastOpenFolder"),
+                      QFileInfo(path).absolutePath());
+    finishLoadingSource();
+}
+
+void MainWindow::loadAviFile(const QString &path)
+{
+    auto source = std::make_shared<seeingforge::AviFile>();
+    if (!source->open(path)) {
+        QMessageBox::critical(this, tr("Cannot Open AVI File"), source->errorString());
         return;
     }
     m_source = std::move(source);
@@ -2489,7 +2661,7 @@ void MainWindow::finishLoadingSource()
     m_nextFrameBtn->setEnabled(multiFrame);
     m_playButton->setEnabled(multiFrame);
 
-    m_debayerMethod->setEnabled(seeingforge::PreviewProcessor::supportsDebayer(m_source->header().colorId));
+    m_bayerPattern->setEnabled(m_source->header().planeCount() == 1);
     {
         const QSignalBlocker bayerBlocker(m_bayerPattern);
         m_bayerPattern->setItemText(0, tr("From source — %1").arg(m_source->header().colorName()));
@@ -2508,6 +2680,9 @@ void MainWindow::finishLoadingSource()
     m_qualKeptTileValue->setText(QStringLiteral("—"));
     m_qualCutoffTileValue->setText(QStringLiteral("—"));
     m_clippedRejectedCountLabel->setText(tr("No clipped frames counted yet."));
+    if (m_obscuredRejectedCountLabel) {
+        m_obscuredRejectedCountLabel->setText(tr("No obscured frames counted yet."));
+    }
     m_qualStatusBadge->setText(tr("PENDING"));
     m_qualStatusBadge->setStyleSheet(QStringLiteral(
         "background: #232830; border: 1px solid #3a414e; color: #aab2bd;"
@@ -2520,21 +2695,9 @@ void MainWindow::finishLoadingSource()
     loadFrame(0);
     checkBayerMetadata();
 
-    {
-        const QSignalBlocker wbBlocker(m_rawExportWhiteBalance);
-        m_rawExportWhiteBalance->clear();
-        m_rawExportWhiteBalance->addItem(tr("Preserve linear sensor values"), 0);
-        if (m_source->hasCameraWhiteBalance())
-            m_rawExportWhiteBalance->addItem(tr("Apply camera white balance"), 1);
-        if (seeingforge::PreviewProcessor::supportsDebayer(effectiveColorId()))
-            m_rawExportWhiteBalance->addItem(tr("Apply automatic neutral balance"), 2);
-        const int preferredBalance = QSettings().value(
-            QStringLiteral("preferences/calibration/sensorBalance"), 0).toInt();
-        const int preferredBalanceIndex = m_rawExportWhiteBalance->findData(preferredBalance);
-        m_rawExportWhiteBalance->setCurrentIndex(
-            preferredBalanceIndex >= 0 ? preferredBalanceIndex : 0);
-        m_rawExportWhiteBalance->setEnabled(m_rawExportWhiteBalance->count() > 1);
-    }
+    m_debayerMethod->setEnabled(
+        seeingforge::PreviewProcessor::supportsDebayer(effectiveColorId()));
+    refreshCalibrationBalanceOptions(false);
 
     updateMetadata();
     updateHeroSummary();
@@ -2549,9 +2712,71 @@ void MainWindow::finishLoadingSource()
     showStatus(m_defaultStatusMessage);
 }
 
+void MainWindow::refreshCalibrationBalanceOptions(bool preserveCurrent)
+{
+    if (!m_rawExportWhiteBalance || !m_source) return;
+    const QVariant previousSelection = preserveCurrent
+        ? m_rawExportWhiteBalance->currentData()
+        : QSettings().value(QStringLiteral("preferences/calibration/sensorBalance"), 0);
+    const QSignalBlocker wbBlocker(m_rawExportWhiteBalance);
+    m_rawExportWhiteBalance->clear();
+    m_rawExportWhiteBalance->addItem(tr("Preserve linear sensor values"), 0);
+    if (m_source->hasCameraWhiteBalance())
+        m_rawExportWhiteBalance->addItem(tr("Apply camera white balance"), 1);
+    if (seeingforge::PreviewProcessor::supportsDebayer(effectiveColorId()))
+        m_rawExportWhiteBalance->addItem(tr("Apply automatic neutral balance"), 2);
+    const int selectedIndex = m_rawExportWhiteBalance->findData(previousSelection);
+    m_rawExportWhiteBalance->setCurrentIndex(selectedIndex >= 0 ? selectedIndex : 0);
+    m_rawExportWhiteBalance->setEnabled(m_rawExportWhiteBalance->count() > 1);
+}
+
 void MainWindow::checkBayerMetadata()
 {
-    if (!std::dynamic_pointer_cast<seeingforge::SerFile>(m_source)) return;
+    const auto ser = std::dynamic_pointer_cast<seeingforge::SerFile>(m_source);
+    const auto avi = std::dynamic_pointer_cast<seeingforge::AviFile>(m_source);
+    if (!ser && !avi) return;
+
+    if (avi && avi->isMissingSidecar()) {
+        const auto detected = seeingforge::BayerPatternAnalyzer::detectPattern(m_rawFrame);
+        if (detected.discrepancy) {
+            const int suggestedIndex = m_bayerPattern->findData(detected.suggestedColorId);
+            if (suggestedIndex >= 0) m_bayerPattern->setCurrentIndex(suggestedIndex);
+            seeingforge::SerHeader suggestedHeader = m_source->header();
+            suggestedHeader.colorId = detected.suggestedColorId;
+            m_bayerWarning->setText(
+                tr("<b>Sidecar TXT metadata missing:</b> no matching <code>.avi.txt</code> file "
+                   "was found beside this AVI. Pixel mosaic analysis detected <b>%1</b> (%2% "
+                   "confidence) and selected it automatically. Review Source & Sensor if needed.")
+                    .arg(suggestedHeader.colorName())
+                    .arg(detected.confidence * 100.0, 0, 'f', 0));
+            m_bayerWarning->show();
+            QMessageBox::warning(
+                this, tr("Missing Sidecar Metadata (.txt)"),
+                tr("No matching .avi.txt metadata file was found beside '%1'.\n\n"
+                   "SeeingForge analyzed the raw pixel mosaic and automatically selected %2 "
+                   "(%3% confidence). Review Source & Sensor if your camera uses a different "
+                   "Bayer pattern, or place the matching .txt file beside the AVI.")
+                    .arg(m_source->displayName(), suggestedHeader.colorName())
+                    .arg(detected.confidence * 100.0, 0, 'f', 0));
+        } else {
+            m_bayerWarning->setText(
+                tr("<b>Sidecar TXT metadata missing:</b> no matching <code>.avi.txt</code> file "
+                   "was found beside this AVI. Loaded as <b>Monochrome</b>. If this is a color "
+                   "camera recording, select the Bayer CFA pattern above or place the matching "
+                   "<code>.txt</code> file beside the AVI."));
+            m_bayerWarning->show();
+            QMessageBox::warning(
+                this, tr("Missing Sidecar Metadata (.txt)"),
+                tr("No matching .avi.txt metadata file was found beside '%1'.\n\n"
+                   "Uncompressed 8-bit/16-bit AVI headers do not store the sensor Bayer pattern, "
+                   "so this recording was loaded as Monochrome. If it is a color RAW recording, "
+                   "select its Bayer pattern in Source & Sensor or place the matching .txt file "
+                   "beside the AVI.")
+                    .arg(m_source->displayName()));
+        }
+        return;
+    }
+
     const auto analysis = seeingforge::BayerPatternAnalyzer::analyze(
         m_rawFrame, m_source->header().colorId);
     if (!analysis.discrepancy) return;
@@ -2703,16 +2928,15 @@ std::uint32_t MainWindow::referenceFrameIndex() const
 {
     if (!m_source || !m_source->isOpen()) return 0;
     if (!m_qualityResult.isEmpty() && !m_qualityResult.rankedFrameIndices.isEmpty()) {
-        QVector<double> clippedByIndex(
-            static_cast<qsizetype>(m_source->header().frameCount), 0.0);
-        for (const auto &frame : m_qualityResult.frames)
-            clippedByIndex[static_cast<qsizetype>(frame.frameIndex)] = frame.clippedPercent;
-        for (const std::uint32_t frameIndex : m_qualityResult.rankedFrameIndices) {
-            if (!m_rejectClipped->isChecked()
-                || clippedByIndex[static_cast<qsizetype>(frameIndex)]
-                       <= m_maxClippedPercent->value()) {
-                return frameIndex;
-            }
+        const QualitySelection sel = evaluateQualitySelection(
+            m_qualityResult, m_source->header().frameCount,
+            m_rejectClipped && m_rejectClipped->isChecked(),
+            m_maxClippedPercent ? m_maxClippedPercent->value() : 5,
+            m_rejectObscured && m_rejectObscured->isChecked(),
+            m_minTargetSignalPercent ? m_minTargetSignalPercent->value() : 80,
+            m_qualityKeep ? m_qualityKeep->currentData().toInt() : 25);
+        if (!sel.eligibleFrames.isEmpty()) {
+            return sel.eligibleFrames.front();
         }
         return m_qualityResult.rankedFrameIndices.front();
     }
@@ -2779,8 +3003,11 @@ void MainWindow::previewRenderFinished()
 void MainWindow::updateDetection()
 {
     if (m_rawFrame.isNull() || !m_detectionThreshold || !m_cropMargin) return;
+    const std::uint32_t colorId = effectiveColorId();
+    const bool bayerMosaic = colorId >= 8U && colorId <= 19U;
     m_detection = seeingforge::ObjectDetector::detect(
-        m_rawFrame, m_detectionThreshold->value(), m_cropMargin->currentData().toInt());
+        m_rawFrame, m_detectionThreshold->value(), m_cropMargin->currentData().toInt(),
+        900, bayerMosaic);
     if (m_detection.found()) {
         QSize requested = m_outputSizeMode->currentData().toSize();
         if (requested == QSize(-2, -2))
@@ -2788,7 +3015,7 @@ void MainWindow::updateDetection()
         const QSize size = exportCropSize(m_rawFrame.size(), m_detection.objectRect,
                                           m_cropMargin->currentData().toInt(), requested);
         QPoint origin = m_detection.objectRect.center() - QPoint(size.width() / 2, size.height() / 2);
-        if (m_source->header().colorId >= 8 && m_source->header().colorId <= 19)
+        if (bayerMosaic)
             origin = QPoint(origin.x() & ~1, origin.y() & ~1);
         m_detection.cropRect = QRect(origin, size);
         const QString objText = QStringLiteral("%1 × %2")
@@ -2869,6 +3096,7 @@ void MainWindow::startQualityAnalysis()
     const auto source = m_source;
     const int backgroundThreshold = m_detectionThreshold
         ? m_detectionThreshold->value() : 12;
+    const std::uint32_t colorId = effectiveColorId();
     m_analyzeQuality->setEnabled(false);
     m_cancelQuality->setEnabled(true);
     m_qualityProgress->setRange(0, static_cast<int>(m_source->header().frameCount));
@@ -2883,12 +3111,13 @@ void MainWindow::startQualityAnalysis()
     m_qualityCancel = std::make_shared<std::atomic_bool>(false);
     const auto cancelFlag = m_qualityCancel;
     m_qualityWatcher->setFuture(QtConcurrent::run(
-        [source, backgroundThreshold, cancelFlag](QPromise<seeingforge::QualityResult> &promise) {
+        [source, backgroundThreshold, colorId, cancelFlag](QPromise<seeingforge::QualityResult> &promise) {
             promise.setProgressRange(0, static_cast<int>(source->header().frameCount));
             auto result = seeingforge::QualityAnalyzer::analyze(
                 *source, backgroundThreshold,
                 [&promise](int completed, int) { promise.setProgressValue(completed); },
-                [cancelFlag] { return cancelFlag->load(); });
+                [cancelFlag] { return cancelFlag->load(); },
+                colorId);
             promise.addResult(std::move(result));
         }));
 }
@@ -2927,34 +3156,13 @@ void MainWindow::updateQualityDisplay()
 {
     if (m_qualityResult.isEmpty() || !m_qualityTable) return;
     const int total = static_cast<int>(m_qualityResult.frames.size());
-    QVector<double> clippedByIndex(
-        static_cast<qsizetype>(m_source->header().frameCount), 0.0);
-    for (const auto &frame : m_qualityResult.frames)
-        clippedByIndex[static_cast<qsizetype>(frame.frameIndex)] = frame.clippedPercent;
-
-    QVector<std::uint32_t> eligibleFrames;
-    int clippedCount = 0;
-    for (const std::uint32_t frameIndex : m_qualityResult.rankedFrameIndices) {
-        const bool isClipped = m_rejectClipped->isChecked()
-            && clippedByIndex[static_cast<qsizetype>(frameIndex)]
-                   > m_maxClippedPercent->value();
-        if (isClipped) ++clippedCount;
-        else eligibleFrames.append(frameIndex);
-    }
-
     const int keepPercent = m_qualityKeep->currentData().toInt();
-    const int keepCount = eligibleFrames.isEmpty() ? 0 : std::clamp(
-        static_cast<int>(std::ceil(eligibleFrames.size() * keepPercent / 100.0)),
-        1, static_cast<int>(eligibleFrames.size()));
-
-    QSet<std::uint32_t> accepted;
-    for (int rank = 0; rank < keepCount; ++rank)
-        accepted.insert(eligibleFrames[rank]);
-
-    QVector<double> scoreByIndex(
-        static_cast<qsizetype>(m_source->header().frameCount), 0.0);
-    for (const auto &frame : m_qualityResult.frames)
-        scoreByIndex[static_cast<qsizetype>(frame.frameIndex)] = frame.score;
+    const QualitySelection sel = evaluateQualitySelection(
+        m_qualityResult, m_source->header().frameCount,
+        m_rejectClipped->isChecked(), m_maxClippedPercent->value(),
+        m_rejectObscured && m_rejectObscured->isChecked(),
+        m_minTargetSignalPercent ? m_minTargetSignalPercent->value() : 80,
+        keepPercent);
 
     const bool orderedByQuality = m_qualityOrder->currentData().toInt() == 1;
     QVector<std::uint32_t> displayOrder;
@@ -2970,11 +3178,12 @@ void MainWindow::updateQualityDisplay()
     QVector<std::uint32_t> tableFrames;
     tableFrames.reserve(displayOrder.size());
     for (const std::uint32_t frameIndex : displayOrder) {
-        const bool isClipped = m_rejectClipped->isChecked()
-            && clippedByIndex[static_cast<qsizetype>(frameIndex)]
-                   > m_maxClippedPercent->value();
-        if (filterMode == 1 && !accepted.contains(frameIndex)) continue;
+        const qsizetype idx = static_cast<qsizetype>(frameIndex);
+        const bool isClipped = sel.isClippedByIndex[idx] != 0;
+        const bool isObscured = sel.isObscuredByIndex[idx] != 0;
+        if (filterMode == 1 && !sel.accepted.contains(frameIndex)) continue;
         if (filterMode == 2 && !isClipped) continue;
+        if (filterMode == 3 && !isObscured) continue;
         tableFrames.append(frameIndex);
     }
 
@@ -2982,22 +3191,29 @@ void MainWindow::updateQualityDisplay()
     m_qualityTable->setRowCount(tableFrames.size());
     for (qsizetype row = 0; row < tableFrames.size(); ++row) {
         const std::uint32_t frameIndex = tableFrames[row];
+        const qsizetype idx = static_cast<qsizetype>(frameIndex);
         auto *frameItem = new QTableWidgetItem(QStringLiteral("#%1").arg(frameIndex + 1U));
         frameItem->setData(Qt::UserRole, static_cast<qulonglong>(frameIndex));
         auto *scoreItem = new QTableWidgetItem(
-            QString::number(scoreByIndex[static_cast<qsizetype>(frameIndex)], 'f', 1));
-        const bool clippedRejected = m_rejectClipped->isChecked()
-            && clippedByIndex[static_cast<qsizetype>(frameIndex)]
-                   > m_maxClippedPercent->value();
-        auto *keepItem = new QTableWidgetItem(clippedRejected ? tr("Clipped")
-            : (accepted.contains(frameIndex) ? tr("Keep") : tr("Skip")));
+            QString::number(sel.scoreByIndex[idx], 'f', 1));
+        const bool clippedRejected = sel.isClippedByIndex[idx] != 0;
+        const bool obscuredRejected = sel.isObscuredByIndex[idx] != 0;
+        auto *keepItem = new QTableWidgetItem(
+            clippedRejected ? tr("Clipped")
+            : (obscuredRejected ? tr("Obscured")
+               : (sel.accepted.contains(frameIndex) ? tr("Keep") : tr("Skip"))));
 
         if (clippedRejected) {
             const QBrush red(QColor(QStringLiteral("#ff4d5a")));
             frameItem->setForeground(red);
             scoreItem->setForeground(red);
             keepItem->setForeground(red);
-        } else if (accepted.contains(frameIndex)) {
+        } else if (obscuredRejected) {
+            const QBrush amber(QColor(QStringLiteral("#f0a04b")));
+            frameItem->setForeground(amber);
+            scoreItem->setForeground(amber);
+            keepItem->setForeground(amber);
+        } else if (sel.accepted.contains(frameIndex)) {
             keepItem->setForeground(QBrush(QColor(QStringLiteral("#52d273"))));
         } else {
             const QBrush muted(QColor(QStringLiteral("#7d838c")));
@@ -3013,31 +3229,40 @@ void MainWindow::updateQualityDisplay()
     QVector<double> displayedScores;
     displayedScores.reserve(displayOrder.size());
     for (const std::uint32_t frameIndex : displayOrder)
-        displayedScores.append(scoreByIndex[static_cast<qsizetype>(frameIndex)]);
+        displayedScores.append(sel.scoreByIndex[static_cast<qsizetype>(frameIndex)]);
 
-    const double cutoffScore = keepCount > 0
-        ? scoreByIndex[static_cast<qsizetype>(eligibleFrames[keepCount - 1])]
+    const double cutoffScore = sel.keepCount > 0
+        ? sel.scoreByIndex[static_cast<qsizetype>(sel.eligibleFrames[sel.keepCount - 1])]
         : 0.0;
-    m_qualityGraph->setScores(std::move(displayedScores), keepCount, keepPercent,
+    m_qualityGraph->setScores(std::move(displayedScores), sel.keepCount, keepPercent,
                               orderedByQuality, cutoffScore, displayOrder);
 
     m_clippedRejectedCountLabel->setText(
-        tr("%1 frames exceed %2% clipped limit").arg(clippedCount).arg(m_maxClippedPercent->value()));
+        tr("%1 frames exceed %2% clipped limit")
+            .arg(sel.clippedCount)
+            .arg(m_maxClippedPercent->value()));
+    if (m_obscuredRejectedCountLabel) {
+        m_obscuredRejectedCountLabel->setText(
+            tr("%1 frames below %2% target signal")
+                .arg(sel.obscuredCount)
+                .arg(m_minTargetSignalPercent ? m_minTargetSignalPercent->value() : 80));
+    }
 
-    if (keepCount == 0) {
+    if (sel.keepCount == 0) {
         m_qualKeptTileValue->setText(QStringLiteral("0 / %1").arg(total));
         m_qualCutoffTileValue->setText(QStringLiteral("—"));
-        m_qualityLabel->setText(tr("All %1 frames exceed the overexposure limit.").arg(total));
+        m_qualityLabel->setText(
+            tr("All %1 frames were rejected by the overexposure or minimum-signal limits.").arg(total));
         m_exportSummary->setText(tr("No frames currently qualify for export."));
     } else {
-        const std::uint32_t bestIndex = m_qualityResult.rankedFrameIndices.front();
-        m_qualKeptTileValue->setText(QStringLiteral("%1 / %2").arg(keepCount).arg(total));
+        const std::uint32_t bestIndex = sel.eligibleFrames.front();
+        m_qualKeptTileValue->setText(QStringLiteral("%1 / %2").arg(sel.keepCount).arg(total));
         m_qualCutoffTileValue->setText(QString::number(cutoffScore, 'f', 1));
         m_qualityLabel->setText(
             tr("Keep %1 of %2 eligible frames (%3 discarded). Best frame: #%4 (%5).")
-                .arg(keepCount).arg(eligibleFrames.size()).arg(total - keepCount)
+                .arg(sel.keepCount).arg(sel.eligibleFrames.size()).arg(total - sel.keepCount)
                 .arg(bestIndex + 1U)
-                .arg(scoreByIndex[static_cast<qsizetype>(bestIndex)], 0, 'f', 1));
+                .arg(sel.scoreByIndex[static_cast<qsizetype>(bestIndex)], 0, 'f', 1));
     }
 
     updateFrameQualityReadout();
@@ -3050,28 +3275,21 @@ void MainWindow::startExport()
 
     QVector<std::uint32_t> frameIndices;
     if (!m_qualityResult.isEmpty()) {
-        QVector<double> clippedByIndex(
-            static_cast<qsizetype>(m_source->header().frameCount), 0.0);
-        for (const auto &frame : m_qualityResult.frames)
-            clippedByIndex[static_cast<qsizetype>(frame.frameIndex)] = frame.clippedPercent;
-        QVector<std::uint32_t> eligibleFrames;
-        for (const std::uint32_t frameIndex : m_qualityResult.rankedFrameIndices) {
-            if (!m_rejectClipped->isChecked()
-                || clippedByIndex[static_cast<qsizetype>(frameIndex)]
-                       <= m_maxClippedPercent->value())
-                eligibleFrames.append(frameIndex);
-        }
-        if (eligibleFrames.isEmpty()) {
-            QMessageBox::warning(this, tr("No Frames to Export"),
-                                 tr("All frames exceed the overexposure limit."));
+        const QualitySelection sel = evaluateQualitySelection(
+            m_qualityResult, m_source->header().frameCount,
+            m_rejectClipped->isChecked(), m_maxClippedPercent->value(),
+            m_rejectObscured && m_rejectObscured->isChecked(),
+            m_minTargetSignalPercent ? m_minTargetSignalPercent->value() : 80,
+            m_qualityKeep->currentData().toInt());
+        if (sel.eligibleFrames.isEmpty()) {
+            QMessageBox::warning(
+                this, tr("No Frames to Export"),
+                tr("All frames were rejected by the overexposure or minimum-signal limits."));
             return;
         }
-        const int keepCount = std::clamp(static_cast<int>(std::ceil(
-            eligibleFrames.size() * m_qualityKeep->currentData().toInt() / 100.0)),
-            1, static_cast<int>(eligibleFrames.size()));
-        frameIndices.reserve(keepCount);
-        for (int rank = 0; rank < keepCount; ++rank)
-            frameIndices.append(eligibleFrames[rank]);
+        frameIndices.reserve(sel.keepCount);
+        for (int rank = 0; rank < sel.keepCount; ++rank)
+            frameIndices.append(sel.eligibleFrames[rank]);
         if (m_qualityOrder->currentData().toInt() == 0)
             std::sort(frameIndices.begin(), frameIndices.end());
     } else {
@@ -3080,6 +3298,8 @@ void MainWindow::startExport()
             frameIndices.append(index);
     }
 
+    const std::uint32_t colorId = effectiveColorId();
+    const bool bayerMosaic = colorId >= 8U && colorId <= 19U;
     const std::uint32_t refIdx = referenceFrameIndex();
     const QImage refFrame = (refIdx == m_currentFrame && !m_rawFrame.isNull())
         ? m_rawFrame : readCachedFrame(refIdx);
@@ -3088,7 +3308,8 @@ void MainWindow::startExport()
         referenceDetection = m_detection;
     } else if (!refFrame.isNull()) {
         referenceDetection = seeingforge::ObjectDetector::detect(
-            refFrame, m_detectionThreshold->value(), m_cropMargin->currentData().toInt());
+            refFrame, m_detectionThreshold->value(), m_cropMargin->currentData().toInt(),
+            900, bayerMosaic);
     }
 
     const int margin = m_cropMargin->currentData().toInt();
@@ -3116,7 +3337,11 @@ void MainWindow::startExport()
         return;
     }
     const bool serInput = dynamic_cast<seeingforge::SerFile *>(m_source.get()) != nullptr;
-    const QString outputName = serInput ? sourceInfo.fileName() : QStringLiteral("raw_sequence.ser");
+    const bool aviInput = dynamic_cast<seeingforge::AviFile *>(m_source.get()) != nullptr;
+    const QString outputName = serInput
+        ? sourceInfo.fileName()
+        : (aviInput ? sourceInfo.completeBaseName() + QStringLiteral(".ser")
+                    : QStringLiteral("raw_sequence.ser"));
     const QString outputPath = parent.filePath(folderName + QLatin1Char('/') + outputName);
 
     seeingforge::SerExportSettings settings;
@@ -3278,7 +3503,7 @@ void MainWindow::updateHeroSummary()
         m_heroDimBadge->setText(QStringLiteral("— × —"));
         m_heroSubtitle->setText(
             tr("Non-destructive planetary & lunar preprocessing — original recordings are never modified"));
-        m_pipelineStateLabel->setText(tr("Drop or open SER / RAW"));
+        m_pipelineStateLabel->setText(tr("Drop or open SER / AVI / RAW"));
         return;
     }
     const auto &header = m_source->header();
@@ -3303,9 +3528,20 @@ void MainWindow::updateHeroSummary()
         "background: rgba(82,210,115,32); border: 1px solid rgba(82,210,115,90); color: #52d273;"
         "border-radius: 9px; padding: 2px 8px; font-size: 10px; font-weight: 700;"));
     m_srcFramesTileValue->setText(QString::number(header.frameCount));
-    m_srcFramesTileSub->setText(
-        dynamic_cast<seeingforge::RawSequence *>(m_source.get()) != nullptr
-            ? tr("DSLR RAW sequence") : tr("SER recording"));
+    if (const auto *aviSource = dynamic_cast<const seeingforge::AviFile *>(m_source.get())) {
+        const auto &meta = aviSource->metadata();
+        QString sub = meta.frameRate > 0.0
+            ? tr("AVI · %1 fps").arg(meta.frameRate, 0, 'f', 1)
+            : tr("AVI recording");
+        if (aviSource->isMissingSidecar()) {
+            sub += tr(" (no TXT)");
+        }
+        m_srcFramesTileSub->setText(sub);
+    } else {
+        m_srcFramesTileSub->setText(
+            dynamic_cast<seeingforge::RawSequence *>(m_source.get()) != nullptr
+                ? tr("DSLR RAW sequence") : tr("SER recording"));
+    }
     m_srcResTileValue->setText(QStringLiteral("%1×%2").arg(header.width).arg(header.height));
     m_srcResTileSub->setText(tr("%1 bytes / frame").arg(header.bytesPerFrame()));
     m_srcFormatTileValue->setText(tr("%1-bit").arg(header.pixelDepth));
@@ -3365,22 +3601,14 @@ void MainWindow::updateWorkflowSummaries()
 
     int keptCount = static_cast<int>(effectiveHeader.frameCount);
     if (!m_qualityResult.isEmpty()) {
-        QVector<double> clippedByIndex(
-            static_cast<qsizetype>(effectiveHeader.frameCount), 0.0);
-        for (const auto &frame : m_qualityResult.frames)
-            clippedByIndex[static_cast<qsizetype>(frame.frameIndex)] = frame.clippedPercent;
-        int eligibleCount = 0;
-        for (const std::uint32_t frameIndex : m_qualityResult.rankedFrameIndices) {
-            if (!m_rejectClipped->isChecked()
-                || clippedByIndex[static_cast<qsizetype>(frameIndex)]
-                       <= m_maxClippedPercent->value()) {
-                ++eligibleCount;
-            }
-        }
         const int keepPct = m_qualityKeep->currentData().toInt();
-        keptCount = eligibleCount == 0 ? 0 : std::clamp(
-            static_cast<int>(std::ceil(eligibleCount * keepPct / 100.0)),
-            1, eligibleCount);
+        const QualitySelection sel = evaluateQualitySelection(
+            m_qualityResult, effectiveHeader.frameCount,
+            m_rejectClipped->isChecked(), m_maxClippedPercent->value(),
+            m_rejectObscured && m_rejectObscured->isChecked(),
+            m_minTargetSignalPercent ? m_minTargetSignalPercent->value() : 80,
+            keepPct);
+        keptCount = sel.keepCount;
         m_navSubLabels[3]->setText(
             tr("Best %1% · %2 / %3 kept").arg(keepPct).arg(keptCount).arg(effectiveHeader.frameCount));
         m_expFramesTileValue->setText(QString::number(keptCount));
@@ -3432,39 +3660,36 @@ void MainWindow::updateFrameQualityReadout()
         m_frameQualityLabel->setStyleSheet(QStringLiteral("color: #8d96a5; font-size: 11px; font-family: monospace;"));
         return;
     }
-    double score = 0.0;
-    double clipped = 0.0;
-    for (const auto &f : m_qualityResult.frames) {
-        if (f.frameIndex == m_currentFrame) {
-            score = f.score;
-            clipped = f.clippedPercent;
-            break;
-        }
-    }
-    const bool clippedRej = m_rejectClipped->isChecked()
-        && clipped > m_maxClippedPercent->value();
-    int eligibleCount = 0;
-    int eligibleRank = -1;
-    QVector<double> clippedByIndex(
-        static_cast<qsizetype>(m_source->header().frameCount), 0.0);
-    for (const auto &f : m_qualityResult.frames)
-        clippedByIndex[static_cast<qsizetype>(f.frameIndex)] = f.clippedPercent;
-    for (const std::uint32_t idx : m_qualityResult.rankedFrameIndices) {
-        if (!m_rejectClipped->isChecked()
-            || clippedByIndex[static_cast<qsizetype>(idx)] <= m_maxClippedPercent->value()) {
-            if (idx == m_currentFrame) eligibleRank = eligibleCount + 1;
-            ++eligibleCount;
-        }
-    }
-    const int keepCount = eligibleCount == 0 ? 0 : std::clamp(
-        static_cast<int>(std::ceil(eligibleCount * m_qualityKeep->currentData().toInt() / 100.0)),
-        1, eligibleCount);
+    const QualitySelection sel = evaluateQualitySelection(
+        m_qualityResult, m_source->header().frameCount,
+        m_rejectClipped->isChecked(), m_maxClippedPercent->value(),
+        m_rejectObscured && m_rejectObscured->isChecked(),
+        m_minTargetSignalPercent ? m_minTargetSignalPercent->value() : 80,
+        m_qualityKeep->currentData().toInt());
+    const qsizetype curIdx = static_cast<qsizetype>(m_currentFrame);
+    const double score = curIdx < sel.scoreByIndex.size() ? sel.scoreByIndex[curIdx] : 0.0;
+    const double clipped = curIdx < sel.clippedByIndex.size() ? sel.clippedByIndex[curIdx] : 0.0;
+    const double coverage = curIdx < sel.coverageByIndex.size() ? sel.coverageByIndex[curIdx] : 1.0;
+    const bool clippedRej = curIdx < sel.isClippedByIndex.size()
+        && sel.isClippedByIndex[curIdx] != 0;
+    const bool obscuredRej = curIdx < sel.isObscuredByIndex.size()
+        && sel.isObscuredByIndex[curIdx] != 0;
+    const int eligibleCount = static_cast<int>(sel.eligibleFrames.size());
+    const qsizetype rankIdx = sel.eligibleFrames.indexOf(m_currentFrame);
+    const int eligibleRank = rankIdx >= 0 ? static_cast<int>(rankIdx) + 1 : -1;
     if (clippedRej) {
         m_frameQualityLabel->setText(
             tr("Quality: %1 · Clipped (%2% > %3% limit) — Rejected")
                 .arg(score, 0, 'f', 1).arg(clipped, 0, 'f', 1).arg(m_maxClippedPercent->value()));
         m_frameQualityLabel->setStyleSheet(QStringLiteral("color: #ff4d5a; font-size: 11px; font-family: monospace;"));
-    } else if (eligibleRank > 0 && eligibleRank <= keepCount) {
+    } else if (obscuredRej) {
+        m_frameQualityLabel->setText(
+            tr("Quality: %1 · Obscured (%2% < %3% signal) — Rejected")
+                .arg(score, 0, 'f', 1)
+                .arg(coverage * 100.0, 0, 'f', 0)
+                .arg(m_minTargetSignalPercent ? m_minTargetSignalPercent->value() : 80));
+        m_frameQualityLabel->setStyleSheet(QStringLiteral("color: #f0a04b; font-size: 11px; font-family: monospace;"));
+    } else if (eligibleRank > 0 && eligibleRank <= sel.keepCount) {
         m_frameQualityLabel->setText(
             tr("Quality: %1 · Kept (Rank #%2 of %3)")
                 .arg(score, 0, 'f', 1).arg(eligibleRank).arg(eligibleCount));
@@ -3498,8 +3723,10 @@ void MainWindow::loadUserPreferences()
     const QSignalBlocker b11(m_qualityKeep);
     const QSignalBlocker b12(m_rejectClipped);
     const QSignalBlocker b13(m_maxClippedPercent);
-    const QSignalBlocker b14(m_qualityOrder);
-    const QSignalBlocker b15(m_exportIntensity);
+    const QSignalBlocker b14(m_rejectObscured);
+    const QSignalBlocker b15(m_minTargetSignalPercent);
+    const QSignalBlocker b16(m_qualityOrder);
+    const QSignalBlocker b17(m_exportIntensity);
 
     setComboData(m_debayerMethod,
                  settings.value(QStringLiteral("preferences/colour/debayer"), true));
@@ -3525,6 +3752,14 @@ void MainWindow::loadUserPreferences()
         settings.value(QStringLiteral("preferences/quality/rejectClipped"), true).toBool());
     m_maxClippedPercent->setValue(
         settings.value(QStringLiteral("preferences/quality/maxClippedPercent"), 5).toInt());
+    m_maxClippedPercent->setEnabled(m_rejectClipped->isChecked());
+    if (m_rejectObscured && m_minTargetSignalPercent) {
+        m_rejectObscured->setChecked(
+            settings.value(QStringLiteral("preferences/quality/rejectObscured"), true).toBool());
+        m_minTargetSignalPercent->setValue(
+            settings.value(QStringLiteral("preferences/quality/minTargetSignalPercent"), 80).toInt());
+        m_minTargetSignalPercent->setEnabled(m_rejectObscured->isChecked());
+    }
     setComboData(m_qualityOrder,
                  settings.value(QStringLiteral("preferences/quality/frameOrder"), 0));
     setComboData(m_exportIntensity,
@@ -3596,15 +3831,22 @@ void MainWindow::applySelectedPreset()
         QSettings settings;
         settings.beginGroup(QStringLiteral("presets/%1").arg(name));
         const QSignalBlocker b1(m_rawExportWhiteBalance), b2(m_cropMargin), b3(m_qualityKeep),
-            b4(m_rejectClipped), b5(m_maxClippedPercent), b6(m_qualityOrder),
-            b7(m_exportIntensity), b8(m_exportMonochrome), b9(m_exportMonoBinning),
-            b10(m_detectionThreshold);
+            b4(m_rejectClipped), b5(m_maxClippedPercent), b6(m_rejectObscured),
+            b7(m_minTargetSignalPercent), b8(m_qualityOrder),
+            b9(m_exportIntensity), b10(m_exportMonochrome), b11(m_exportMonoBinning),
+            b12(m_detectionThreshold);
         setComboData(m_rawExportWhiteBalance, settings.value(QStringLiteral("sensorBalance"), 0));
         setComboData(m_cropMargin, settings.value(QStringLiteral("cropMargin"), 20));
         m_detectionThreshold->setValue(settings.value(QStringLiteral("threshold"), 16).toInt());
         setComboData(m_qualityKeep, settings.value(QStringLiteral("keepPercent"), 25));
         m_rejectClipped->setChecked(settings.value(QStringLiteral("rejectClipped"), true).toBool());
         m_maxClippedPercent->setValue(settings.value(QStringLiteral("maxClippedPercent"), 5).toInt());
+        m_maxClippedPercent->setEnabled(m_rejectClipped->isChecked());
+        if (m_rejectObscured && m_minTargetSignalPercent) {
+            m_rejectObscured->setChecked(settings.value(QStringLiteral("rejectObscured"), true).toBool());
+            m_minTargetSignalPercent->setValue(settings.value(QStringLiteral("minTargetSignalPercent"), 80).toInt());
+            m_minTargetSignalPercent->setEnabled(m_rejectObscured->isChecked());
+        }
         setComboData(m_qualityOrder, settings.value(QStringLiteral("frameOrder"), 0));
         setComboData(m_exportIntensity, settings.value(QStringLiteral("intensity"), 1.0));
         const bool mono = settings.value(QStringLiteral("monochrome"), false).toBool();
@@ -3639,6 +3881,10 @@ void MainWindow::saveNamedPreset()
     settings.setValue(QStringLiteral("keepPercent"), m_qualityKeep->currentData());
     settings.setValue(QStringLiteral("rejectClipped"), m_rejectClipped->isChecked());
     settings.setValue(QStringLiteral("maxClippedPercent"), m_maxClippedPercent->value());
+    if (m_rejectObscured && m_minTargetSignalPercent) {
+        settings.setValue(QStringLiteral("rejectObscured"), m_rejectObscured->isChecked());
+        settings.setValue(QStringLiteral("minTargetSignalPercent"), m_minTargetSignalPercent->value());
+    }
     settings.setValue(QStringLiteral("frameOrder"), m_qualityOrder->currentData());
     settings.setValue(QStringLiteral("intensity"), m_exportIntensity->currentData());
     settings.setValue(QStringLiteral("monochrome"), m_exportMonochrome->isChecked());
@@ -3678,6 +3924,12 @@ void MainWindow::savePreferredChoices()
                       m_rejectClipped->isChecked());
     settings.setValue(QStringLiteral("preferences/quality/maxClippedPercent"),
                       m_maxClippedPercent->value());
+    if (m_rejectObscured && m_minTargetSignalPercent) {
+        settings.setValue(QStringLiteral("preferences/quality/rejectObscured"),
+                          m_rejectObscured->isChecked());
+        settings.setValue(QStringLiteral("preferences/quality/minTargetSignalPercent"),
+                          m_minTargetSignalPercent->value());
+    }
     settings.setValue(QStringLiteral("preferences/quality/frameOrder"),
                       m_qualityOrder->currentData());
     settings.setValue(QStringLiteral("preferences/export/intensity"),
@@ -3728,6 +3980,12 @@ void MainWindow::resetCurrentStep()
         m_qualityKeep->setCurrentIndex(m_qualityKeep->findData(25));
         m_rejectClipped->setChecked(true);
         m_maxClippedPercent->setValue(5);
+        m_maxClippedPercent->setEnabled(true);
+        if (m_rejectObscured && m_minTargetSignalPercent) {
+            m_rejectObscured->setChecked(true);
+            m_minTargetSignalPercent->setValue(80);
+            m_minTargetSignalPercent->setEnabled(true);
+        }
         m_qualityOrder->setCurrentIndex(m_qualityOrder->findData(0));
         if (auto *btn = m_qualityFilterGroup->button(0)) btn->setChecked(true);
         settings.remove(QStringLiteral("preferences/quality"));
@@ -3997,22 +4255,63 @@ void MainWindow::updateMetadata()
 {
     if (!m_metadataTable) return;
     if (!m_source || !m_source->isOpen()) {
+        m_metadataTable->setRowCount(10);
         for (int row = 0; row < m_metadataTable->rowCount(); ++row)
             setMetadataRow(row, row == 0 ? tr("Status") : QString(),
                            row == 0 ? tr("No source loaded") : QString());
         return;
     }
     const auto &header = m_source->header();
-    setMetadataRow(0, tr("Source"), m_source->displayName());
-    setMetadataRow(1, tr("Dimensions"), tr("%1 × %2 px").arg(header.width).arg(header.height));
-    setMetadataRow(2, tr("Frames"), QString::number(header.frameCount));
-    setMetadataRow(3, tr("Pixel depth"), tr("%1-bit").arg(header.pixelDepth));
-    setMetadataRow(4, tr("Color format"), header.colorName());
-    setMetadataRow(5, tr("Identifier"), header.fileId);
-    setMetadataRow(6, tr("Observer"), header.observer.isEmpty() ? tr("—") : header.observer);
-    setMetadataRow(7, tr("Instrument"), header.instrument.isEmpty() ? tr("—") : header.instrument);
-    setMetadataRow(8, tr("Telescope"), header.telescope.isEmpty() ? tr("—") : header.telescope);
-    setMetadataRow(9, tr("Frame size"), tr("%1 bytes").arg(header.bytesPerFrame()));
+    seeingforge::SerHeader effectiveHeader = header;
+    effectiveHeader.colorId = effectiveColorId();
+    const QString colorText = effectiveHeader.colorId != header.colorId
+        ? tr("%1 (override; source: %2)").arg(effectiveHeader.colorName(), header.colorName())
+        : header.colorName();
+
+    QList<QPair<QString, QString>> rows{
+        {tr("Source"), m_source->displayName()},
+        {tr("Dimensions"), tr("%1 × %2 px").arg(header.width).arg(header.height)},
+        {tr("Frames"), QString::number(header.frameCount)},
+        {tr("Pixel depth"), tr("%1-bit").arg(header.pixelDepth)},
+        {tr("Color format"), colorText},
+        {tr("Identifier"), header.fileId},
+        {tr("Observer"), header.observer.isEmpty() ? tr("—") : header.observer},
+        {tr("Instrument"), header.instrument.isEmpty() ? tr("—") : header.instrument},
+        {tr("Telescope"), header.telescope.isEmpty() ? tr("—") : header.telescope},
+        {tr("Frame size"), tr("%1 bytes").arg(header.bytesPerFrame())},
+    };
+
+    if (const auto *aviSource = dynamic_cast<const seeingforge::AviFile *>(m_source.get())) {
+        const auto &meta = aviSource->metadata();
+        if (meta.frameRate > 0.0) {
+            rows.append({tr("Frame rate"), tr("%1 fps").arg(meta.frameRate, 0, 'f', 2)});
+        }
+        if (meta.hasSidecar) {
+            rows.append({tr("Sidecar TXT"), QFileInfo(meta.sidecarPath).fileName()});
+        } else if (meta.expectsSidecar) {
+            rows.append({tr("Sidecar TXT"), tr("Missing (.txt not found)")});
+        }
+        if (!meta.objectName.isEmpty()) {
+            rows.append({tr("Object"), meta.objectName});
+        }
+        if (!meta.temperatureText.isEmpty()) {
+            rows.append({tr("Temperature"), meta.temperatureText});
+        }
+        if (!meta.dateObsText.isEmpty()) {
+            rows.append({tr("DATE-OBS (UTC)"), meta.dateObsText});
+        }
+        if (!meta.siteLocationText.isEmpty()) {
+            rows.append({tr("Site location"), meta.siteLocationText});
+        }
+        if (!meta.cropText.isEmpty()) {
+            rows.append({tr("ROI / Crop"), meta.cropText});
+        }
+    }
+
+    m_metadataTable->setRowCount(static_cast<int>(rows.size()));
+    for (int row = 0; row < rows.size(); ++row) {
+        setMetadataRow(row, rows.at(row).first, rows.at(row).second);
+    }
 }
 
 void MainWindow::setMetadataRow(int row, const QString &name, const QString &value)
@@ -4035,8 +4334,8 @@ void MainWindow::showStatus(const QString &message, int timeoutMs)
 void MainWindow::showAbout()
 {
     QMessageBox::about(this, tr("About SeeingForge"),
-        tr("<h2>SeeingForge 0.3.0</h2><p>Open-source planetary imaging preparation.</p>"
-           "<p>Guided SER and DSLR RAW sequence preprocessing for stacking.</p>"));
+        tr("<h2>SeeingForge 0.4.0</h2><p>Open-source planetary imaging preparation.</p>"
+           "<p>Guided SER, AVI, and DSLR RAW sequence preprocessing for stacking.</p>"));
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)

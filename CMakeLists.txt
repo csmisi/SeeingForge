@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(SeeingForge VERSION 0.3.0 LANGUAGES CXX)
+project(SeeingForge VERSION 0.4.0 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 
@@ -14,6 +14,8 @@ find_path(LIBRAW_INCLUDE_DIR NAMES libraw/libraw.h REQUIRED)
 find_library(LIBRAW_LIBRARY NAMES raw_r raw libraw REQUIRED)
 
 add_library(seeingforge_core
+    src/core/AviFile.cpp
+    src/core/AviFile.h
     src/core/BayerPatternAnalyzer.cpp
     src/core/BayerPatternAnalyzer.h
     src/core/HotPixelDetector.cpp
@@ -54,6 +56,9 @@ set_target_properties(seeingforge PROPERTIES
 
 add_executable(seeingforge_ser_probe tools/SerProbe.cpp)
 target_link_libraries(seeingforge_ser_probe PRIVATE seeingforge_core Qt6::Core)
+
+add_executable(seeingforge_avi_probe tools/AviProbe.cpp)
+target_link_libraries(seeingforge_avi_probe PRIVATE seeingforge_core Qt6::Core)
 
 add_executable(seeingforge_raw_probe tools/RawProbe.cpp)
 target_link_libraries(seeingforge_raw_probe PRIVATE seeingforge_core Qt6::Core)

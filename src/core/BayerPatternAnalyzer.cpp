@@ -6,16 +6,22 @@
 #include <cstdint>
 
 namespace seeingforge {
+namespace {
 
-BayerPatternAnalysis BayerPatternAnalyzer::analyze(
-    const QImage &frame, std::uint32_t declaredColorId)
+struct MosaicStats {
+    double diagonal = 0.0;
+    double offDiagonal = 0.0;
+    double confidence = 0.0;
+    bool detectedDiagonalGreens = false;
+    std::array<double, 4> means{};
+    bool valid = false;
+};
+
+MosaicStats computeMosaicStats(const QImage &frame)
 {
-    BayerPatternAnalysis result;
-    result.declaredColorId = declaredColorId;
-    result.suggestedColorId = declaredColorId;
-    if (declaredColorId < 8 || declaredColorId > 11 || frame.isNull()
-        || frame.width() < 16 || frame.height() < 16) {
-        return result;
+    MosaicStats stats;
+    if (frame.isNull() || frame.width() < 16 || frame.height() < 16) {
+        return stats;
     }
 
     const QImage gray = frame.format() == QImage::Format_Grayscale8
@@ -39,26 +45,75 @@ BayerPatternAnalysis BayerPatternAnalyzer::analyze(
             ++samples;
         }
     }
-    if (samples < 1024) return result;
+    if (samples < 1024) return stats;
 
     const double sampleCount = static_cast<double>(samples);
-    const double diagonal = static_cast<double>(diagonalDifference) / sampleCount;
-    const double offDiagonal = static_cast<double>(offDiagonalDifference) / sampleCount;
-    const bool detectedDiagonalGreens = diagonal < offDiagonal;
+    stats.diagonal = static_cast<double>(diagonalDifference) / sampleCount;
+    stats.offDiagonal = static_cast<double>(offDiagonalDifference) / sampleCount;
+    stats.detectedDiagonalGreens = stats.diagonal < stats.offDiagonal;
+    const double lower = std::min(stats.diagonal, stats.offDiagonal);
+    const double higher = std::max(stats.diagonal, stats.offDiagonal);
+    stats.confidence = higher > 0.0 ? 1.0 - lower / higher : 0.0;
+    for (std::size_t i = 0; i < 4; ++i) {
+        stats.means[i] = static_cast<double>(sums[i]) / sampleCount;
+    }
+    stats.valid = true;
+    return stats;
+}
+
+} // namespace
+
+BayerPatternAnalysis BayerPatternAnalyzer::analyze(
+    const QImage &frame, std::uint32_t declaredColorId)
+{
+    BayerPatternAnalysis result;
+    result.declaredColorId = declaredColorId;
+    result.suggestedColorId = declaredColorId;
+    if (declaredColorId < 8 || declaredColorId > 11) {
+        return result;
+    }
+
+    const MosaicStats stats = computeMosaicStats(frame);
+    if (!stats.valid) return result;
+
     const bool declaredDiagonalGreens = declaredColorId == 9 || declaredColorId == 10;
-    const double lower = std::min(diagonal, offDiagonal);
-    const double higher = std::max(diagonal, offDiagonal);
-    result.confidence = higher > 0.0 ? 1.0 - lower / higher : 0.0;
-    if (detectedDiagonalGreens == declaredDiagonalGreens || result.confidence < 0.35)
+    result.confidence = stats.confidence;
+    if (stats.detectedDiagonalGreens == declaredDiagonalGreens || result.confidence < 0.35)
         return result;
 
-    const auto mean = [&sums, sampleCount](std::size_t index) {
-        return static_cast<double>(sums[index]) / sampleCount;
-    };
-    if (detectedDiagonalGreens) {
-        result.suggestedColorId = mean(1) >= mean(2) ? 9U : 10U;
+    if (stats.detectedDiagonalGreens) {
+        result.suggestedColorId = stats.means[1] >= stats.means[2] ? 9U : 10U;
     } else {
-        result.suggestedColorId = mean(0) >= mean(3) ? 8U : 11U;
+        result.suggestedColorId = stats.means[0] >= stats.means[3] ? 8U : 11U;
+    }
+    result.discrepancy = true;
+    return result;
+}
+
+BayerPatternAnalysis BayerPatternAnalyzer::detectPattern(const QImage &frame)
+{
+    BayerPatternAnalysis result;
+    const MosaicStats stats = computeMosaicStats(frame);
+    if (!stats.valid) return result;
+
+    result.confidence = stats.confidence;
+    if (result.confidence < 0.45) return result;
+
+    const double greenDiff = stats.detectedDiagonalGreens
+        ? std::abs(stats.means[0] - stats.means[3])
+        : std::abs(stats.means[1] - stats.means[2]);
+    const double colorDiff = stats.detectedDiagonalGreens
+        ? std::abs(stats.means[1] - stats.means[2])
+        : std::abs(stats.means[0] - stats.means[3]);
+
+    if (colorDiff < 4.0 || greenDiff > 0.25 * colorDiff) {
+        return result;
+    }
+
+    if (stats.detectedDiagonalGreens) {
+        result.suggestedColorId = stats.means[1] >= stats.means[2] ? 9U : 10U;
+    } else {
+        result.suggestedColorId = stats.means[0] >= stats.means[3] ? 8U : 11U;
     }
     result.discrepancy = true;
     return result;

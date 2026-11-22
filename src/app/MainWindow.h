@@ -2,6 +2,7 @@
 
 #include "core/PreviewProcessor.h"
 #include "core/FrameSource.h"
+#include "core/AviFile.h"
 #include "core/SerFile.h"
 #include "core/RawSequence.h"
 #include "core/ObjectDetector.h"
@@ -58,6 +59,7 @@ protected:
 
 private slots:
     void openSerFile();
+    void openAviFile();
     void openRawFiles();
     void openRawFolder();
     void fitImage();
@@ -105,9 +107,11 @@ private:
     QWidget *createExportInspector();
     QWidget *createFooterBar();
     void loadSerFile(const QString &path);
+    void loadAviFile(const QString &path);
     void loadRawFiles(const QStringList &paths);
     void rawSequenceLoadFinished();
     void finishLoadingSource();
+    void refreshCalibrationBalanceOptions(bool preserveCurrent = false);
     void checkBayerMetadata();
     void loadFrame(std::uint32_t index);
     QImage readCachedFrame(std::uint32_t index);
@@ -263,6 +267,9 @@ private:
     QCheckBox *m_rejectClipped = nullptr;
     QSpinBox *m_maxClippedPercent = nullptr;
     QLabel *m_clippedRejectedCountLabel = nullptr;
+    QCheckBox *m_rejectObscured = nullptr;
+    QSpinBox *m_minTargetSignalPercent = nullptr;
+    QLabel *m_obscuredRejectedCountLabel = nullptr;
     QLabel *m_qualityLabel = nullptr;
     QualityGraph *m_qualityGraph = nullptr;
     QButtonGroup *m_qualityFilterGroup = nullptr;

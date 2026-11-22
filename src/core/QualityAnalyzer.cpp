@@ -44,17 +44,22 @@ double normalize(double value, double low, double high)
 
 FrameQuality QualityAnalyzer::measureFrame(const QImage &frame,
                                            std::uint32_t frameIndex,
-                                           int backgroundThreshold)
+                                           int backgroundThreshold,
+                                           bool bayerMosaic)
 {
     FrameQuality result;
     result.frameIndex = frameIndex;
+    result.targetCoverage = 0.0;
     if (frame.isNull() || frame.width() < 5 || frame.height() < 5) return result;
 
     const DetectionResult detection = ObjectDetector::detect(
-        frame, backgroundThreshold, 10);
+        frame, backgroundThreshold, 10, 900, bayerMosaic);
     result.objectRect = detection.found() ? detection.objectRect : QRect();
     const QRect region = detection.found() ? detection.cropRect : frame.rect();
-    const int samplingStep = std::max(1, std::max(region.width(), region.height()) / 400);
+    int samplingStep = std::max(1, std::max(region.width(), region.height()) / 400);
+    if (bayerMosaic && (samplingStep & 1) == 0) {
+        ++samplingStep;
+    }
     double sum = 0.0;
     double sumSquares = 0.0;
     double gradientEnergy = 0.0;
@@ -85,6 +90,10 @@ FrameQuality QualityAnalyzer::measureFrame(const QImage &frame,
         }
     }
     if (count == 0) return result;
+    const double pixelWeight = static_cast<double>(samplingStep) * static_cast<double>(samplingStep);
+    result.foregroundArea = static_cast<double>(count) * pixelWeight;
+    result.totalFlux = sum * pixelWeight;
+    result.targetCoverage = 1.0;
     result.meanBrightness = sum / static_cast<double>(count);
     const double deviation = std::sqrt(std::max(
         0.0, sumSquares / static_cast<double>(count)
@@ -100,7 +109,8 @@ FrameQuality QualityAnalyzer::measureFrame(const QImage &frame,
 QualityResult QualityAnalyzer::analyze(
     const FrameSource &file, int backgroundThreshold,
     const std::function<void(int, int)> &progress,
-    const std::function<bool()> &shouldCancel)
+    const std::function<bool()> &shouldCancel,
+    std::uint32_t effectiveColorId)
 {
     QualityResult result;
     result.detectionThreshold = backgroundThreshold;
@@ -111,6 +121,10 @@ QualityResult QualityAnalyzer::analyze(
         result.canceled = true;
         return result;
     }
+
+    const std::uint32_t colorId = effectiveColorId != 0U
+        ? effectiveColorId : file.header().colorId;
+    const bool bayerMosaic = colorId >= 8U && colorId <= 19U;
 
     QVector<FrameQuality> measured(static_cast<qsizetype>(frameCount));
     QVector<quint8> valid(static_cast<qsizetype>(frameCount), 0);
@@ -139,7 +153,7 @@ QualityResult QualityAnalyzer::analyze(
             const QImage frame = file.readFrame(index);
             if (!frame.isNull()) {
                 measured[static_cast<qsizetype>(index)] = measureFrame(
-                    frame, index, backgroundThreshold);
+                    frame, index, backgroundThreshold, bayerMosaic);
                 valid[static_cast<qsizetype>(index)] = 1;
             }
             const int done = completedCount.fetch_add(1) + 1;
@@ -176,24 +190,45 @@ QualityResult QualityAnalyzer::analyze(
     }
     if (result.frames.isEmpty()) return result;
 
-    QVector<double> brightness;
-    brightness.reserve(result.frames.size());
+    QVector<double> nonZeroAreas;
+    QVector<double> nonZeroFluxes;
+    QVector<double> nonZeroBrightness;
+    nonZeroAreas.reserve(result.frames.size());
+    nonZeroFluxes.reserve(result.frames.size());
+    nonZeroBrightness.reserve(result.frames.size());
     for (const auto &frame : result.frames) {
-        brightness.append(frame.meanBrightness);
+        if (frame.foregroundArea > 0.0) {
+            nonZeroAreas.append(frame.foregroundArea);
+            nonZeroFluxes.append(frame.totalFlux);
+            nonZeroBrightness.append(frame.meanBrightness);
+        }
     }
-    const double medianBrightness = percentile(brightness, 0.50);
+    const double refArea = percentile(nonZeroAreas, 0.90);
+    const double refFlux = percentile(nonZeroFluxes, 0.90);
+    const double medianBrightness = percentile(nonZeroBrightness, 0.50);
 
     QVector<double> rawScoreByIndex(static_cast<qsizetype>(file.header().frameCount), 0.0);
     QVector<double> rawScores;
     rawScores.reserve(result.frames.size());
     for (auto &frame : result.frames) {
-        const double exposureError = medianBrightness > 0.0
-            ? std::abs(frame.meanBrightness - medianBrightness) / medianBrightness : 0.0;
-        const double exposureConsistency = std::clamp(1.0 - exposureError * 4.0, 0.0, 1.0);
-        const double clippingPenalty = std::clamp(frame.clippedPercent / 10.0, 0.0, 1.0);
-        frame.score = std::log1p(frame.sharpness * 1000.0)
-                      + 0.20 * std::log1p(frame.contrast * 10.0)
-                      + 0.05 * exposureConsistency - 0.15 * clippingPenalty;
+        if (frame.foregroundArea <= 0.0 || refArea <= 0.0 || refFlux <= 0.0) {
+            frame.targetCoverage = 0.0;
+            frame.score = 0.0;
+        } else {
+            frame.targetCoverage = std::min(
+                std::clamp(frame.foregroundArea / refArea, 0.0, 1.0),
+                std::clamp(frame.totalFlux / refFlux, 0.0, 1.0));
+            const double effectiveCoverage = std::clamp(frame.targetCoverage / 0.98, 0.0, 1.0);
+            const double exposureError = medianBrightness > 0.0
+                ? std::abs(frame.meanBrightness - medianBrightness) / medianBrightness : 0.0;
+            const double exposureConsistency = std::clamp(1.0 - exposureError * 4.0, 0.0, 1.0);
+            const double clippingPenalty = std::clamp(frame.clippedPercent / 10.0, 0.0, 1.0);
+            const double positiveQuality = std::log1p(frame.sharpness * 1000.0)
+                                           + 0.20 * std::log1p(frame.contrast * 10.0)
+                                           + 0.05 * exposureConsistency;
+            frame.score = positiveQuality * effectiveCoverage * effectiveCoverage
+                          - 0.15 * clippingPenalty;
+        }
         rawScoreByIndex[static_cast<qsizetype>(frame.frameIndex)] = frame.score;
         rawScores.append(frame.score);
     }
