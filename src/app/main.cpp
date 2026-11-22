@@ -7,7 +7,7 @@ int main(int argc, char *argv[])
 {
     QApplication application(argc, argv);
     QApplication::setApplicationName(QStringLiteral("SeeingForge"));
-    QApplication::setApplicationVersion(QStringLiteral("0.4.0"));
+    QApplication::setApplicationVersion(QStringLiteral("0.4.1"));
     QApplication::setOrganizationName(QStringLiteral("SeeingForge"));
 
     MainWindow window;

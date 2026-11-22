@@ -498,8 +498,8 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
     setWindowTitle(QStringLiteral("SeeingForge"));
-    resize(1420, 880);
-    setMinimumSize(980, 650);
+    resize(1500, 880);
+    setMinimumSize(1060, 650);
     setAcceptDrops(true);
 
     m_frameDebounce = new QTimer(this);
@@ -870,7 +870,7 @@ void MainWindow::createWorkspace()
     splitter->setStretchFactor(0, 0);
     splitter->setStretchFactor(1, 1);
     splitter->setStretchFactor(2, 0);
-    splitter->setSizes({246, 800, 384});
+    splitter->setSizes({246, 780, 460});
     rootLayout->addWidget(splitter, 1);
 
     rootLayout->addWidget(createFooterBar());
@@ -1528,8 +1528,8 @@ QWidget *MainWindow::createInspectorPanel()
     auto *panel = new QFrame(this);
     panel->setObjectName(QStringLiteral("inspectorPanel"));
     panel->setAttribute(Qt::WA_StyledBackground, true);
-    panel->setMinimumWidth(340);
-    panel->setMaximumWidth(540);
+    panel->setMinimumWidth(420);
+    panel->setMaximumWidth(640);
     auto *layout = new QVBoxLayout(panel);
     layout->setContentsMargins(0, 0, 0, 0);
 
@@ -2021,6 +2021,8 @@ QWidget *MainWindow::createQualityInspector()
 
     auto *comboGrid = new QGridLayout;
     comboGrid->setSpacing(8);
+    comboGrid->setColumnStretch(0, 1);
+    comboGrid->setColumnStretch(1, 1);
     auto *keepLbl = new QLabel(tr("Frames to keep"), curveCard);
     keepLbl->setStyleSheet(QStringLiteral("color: #8d96a5; font-size: 11px;"));
     auto *orderLbl = new QLabel(tr("Frame order"), curveCard);
@@ -2029,6 +2031,8 @@ QWidget *MainWindow::createQualityInspector()
     comboGrid->addWidget(orderLbl, 0, 1);
 
     m_qualityKeep = new QComboBox(curveCard);
+    m_qualityKeep->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_qualityKeep->setMinimumContentsLength(12);
     m_qualityKeep->addItem(tr("Best 10% — strict"), 10);
     m_qualityKeep->addItem(tr("Best 25% — recommended"), 25);
     m_qualityKeep->addItem(tr("Best 50%"), 50);
@@ -2039,6 +2043,8 @@ QWidget *MainWindow::createQualityInspector()
             this, &MainWindow::updateQualityDisplay);
 
     m_qualityOrder = new QComboBox(curveCard);
+    m_qualityOrder->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_qualityOrder->setMinimumContentsLength(12);
     m_qualityOrder->addItem(tr("Original capture order"), 0);
     m_qualityOrder->addItem(tr("Quality score — best first"), 1);
     connect(m_qualityOrder, &QComboBox::currentIndexChanged,
@@ -2049,11 +2055,13 @@ QWidget *MainWindow::createQualityInspector()
     static_cast<QVBoxLayout *>(curveCard->layout())->addLayout(comboGrid);
 
     auto *clipRow = new QHBoxLayout;
+    clipRow->setSpacing(8);
     m_rejectClipped = new QCheckBox(tr("Reject overexposed (max clipped)"), curveCard);
     m_rejectClipped->setChecked(true);
     m_maxClippedPercent = new QSpinBox(curveCard);
     m_maxClippedPercent->setRange(1, 100);
     m_maxClippedPercent->setValue(5);
+    m_maxClippedPercent->setMinimumWidth(72);
     m_maxClippedPercent->setSuffix(QStringLiteral("%"));
     connect(m_rejectClipped, &QCheckBox::toggled,
             m_maxClippedPercent, &QSpinBox::setEnabled);
@@ -2070,11 +2078,13 @@ QWidget *MainWindow::createQualityInspector()
     curveCard->layout()->addWidget(m_clippedRejectedCountLabel);
 
     auto *obscuredRow = new QHBoxLayout;
+    obscuredRow->setSpacing(8);
     m_rejectObscured = new QCheckBox(tr("Reject obscured / dim (min signal)"), curveCard);
     m_rejectObscured->setChecked(true);
     m_minTargetSignalPercent = new QSpinBox(curveCard);
     m_minTargetSignalPercent->setRange(10, 99);
     m_minTargetSignalPercent->setValue(80);
+    m_minTargetSignalPercent->setMinimumWidth(72);
     m_minTargetSignalPercent->setSuffix(QStringLiteral("%"));
     connect(m_rejectObscured, &QCheckBox::toggled,
             m_minTargetSignalPercent, &QSpinBox::setEnabled);
@@ -2098,6 +2108,17 @@ QWidget *MainWindow::createQualityInspector()
 
     // Filterable Frame List Card
     auto *tableCard = makeCard(page);
+    auto *tableHeaderRow = new QHBoxLayout;
+    tableHeaderRow->setSpacing(6);
+    auto *tableTitle = new QLabel(tr("Frame List"), tableCard);
+    tableTitle->setStyleSheet(QStringLiteral("color: #ffffff; font-size: 12px; font-weight: 700;"));
+    auto *clickHint = new QLabel(tr("Click row to inspect"), tableCard);
+    clickHint->setStyleSheet(QStringLiteral("color: #7e8795; font-size: 11px;"));
+    tableHeaderRow->addWidget(tableTitle);
+    tableHeaderRow->addStretch(1);
+    tableHeaderRow->addWidget(clickHint);
+    static_cast<QVBoxLayout *>(tableCard->layout())->addLayout(tableHeaderRow);
+
     auto *filterRow = new QHBoxLayout;
     filterRow->setSpacing(4);
     m_qualityFilterGroup = new QButtonGroup(this);
@@ -2117,14 +2138,13 @@ QWidget *MainWindow::createQualityInspector()
     connect(m_qualityFilterGroup, &QButtonGroup::idClicked,
             this, &MainWindow::updateQualityDisplay);
     filterRow->addStretch(1);
-    auto *clickHint = new QLabel(tr("Click row to inspect"), tableCard);
-    clickHint->setStyleSheet(QStringLiteral("color: #7e8795; font-size: 11px;"));
-    filterRow->addWidget(clickHint);
     static_cast<QVBoxLayout *>(tableCard->layout())->addLayout(filterRow);
 
     m_qualityTable = new QTableWidget(0, 3, tableCard);
     m_qualityTable->setHorizontalHeaderLabels({tr("Frame"), tr("Score"), tr("Status")});
     m_qualityTable->verticalHeader()->hide();
+    m_qualityTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    m_qualityTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     m_qualityTable->horizontalHeader()->setStretchLastSection(true);
     m_qualityTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_qualityTable->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -4334,7 +4354,7 @@ void MainWindow::showStatus(const QString &message, int timeoutMs)
 void MainWindow::showAbout()
 {
     QMessageBox::about(this, tr("About SeeingForge"),
-        tr("<h2>SeeingForge 0.4.0</h2><p>Open-source planetary imaging preparation.</p>"
+        tr("<h2>SeeingForge 0.4.1</h2><p>Open-source planetary imaging preparation.</p>"
            "<p>Guided SER, AVI, and DSLR RAW sequence preprocessing for stacking.</p>"));
 }
 
